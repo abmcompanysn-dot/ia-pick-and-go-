@@ -12,6 +12,7 @@ import time
 import asyncio
 import pickle # Pour sauvegarder l'index sur le disque
 import threading # Pour le multitâche fluide
+from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
@@ -19,6 +20,9 @@ from groq import Groq
 from PIL import Image, ImageDraw, ImageFont # Pour dessiner sur les images
 from ultralytics import YOLO # Moteur de vision
 from pydantic import BaseModel
+
+# Charger les variables d'environnement depuis le fichier .env
+load_dotenv()
 
 # --- CONFIGURATION DU SYSTÈME ---
 
@@ -98,7 +102,7 @@ except Exception as e:
     mp_drawing = None
 
 client = Groq( # Initialisation du client Groq
-    api_key="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",
+    api_key=os.getenv("GROQ_API_KEY"),
 )
 
 # --- MÉMOIRE DES CAMÉRAS (POUR LE DASHBOARD ADMIN) ---

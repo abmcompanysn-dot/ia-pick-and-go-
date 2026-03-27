@@ -4,10 +4,14 @@ from pydantic import BaseModel
 from groq import Groq
 import pandas as pd
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+
+# Charger les variables d'environnement
+load_dotenv()
 
 # Configuration
 app = FastAPI(title="ABM EduPilote AI Service")
-client = Groq(api_key="VOTRE_CLE_API_GROQ")
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 app.add_middleware(
     CORSMiddleware,
