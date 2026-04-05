@@ -638,37 +638,18 @@ async def get_products_data():
 
 @app.post("/api/login")
 async def api_login(phone: str = Form(...), password: str = Form(...)):
-    """Vérifie les identifiants et renvoie les données du client."""
-    # Dans un cas réel, on interroge Google Sheets. 
-    # Pour la rapidité, on utilise l'API Apps Script existante pour récupérer les infos
-    # Ce code est désactivé car la logique de login a été migrée vers Apps Script
-    # et est appelée directement depuis le frontend ou par l'endpoint rfid_login
-    # Cette fonction ne devrait pas être appelée directement par le frontend client_v2.html
-    # mais sert juste de placeholder ou d'ancienne version. La vraie logique de login est dans Apps Script.
-    # Pour des raisons de compatibilité et clarté, nous allons la faire pointer vers Apps Script aussi.
+    """Vérifie les identifiants auprès d'Apps Script."""
     payload = {"action": "login", "payload": {"phone": phone, "password": password}}
     try:
-        # On récupère les données via l'endpoint existant qui agrège solde et transactions
-        res = requests.get(f"http://localhost:8000/api/client_data/{phone}")
-        if res.status_code == 200:
-            user_data = res.json()
-            # Note: Le mot de passe devrait être vérifié ici. 
-            # Si votre WALLETS contient les passwords ou si Apps Script les renvoie :
-            # if user_data.get('password') == password:
-            return {"status": "success", "user_data": user_data}
-        
-        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
         resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=5)
         resp.raise_for_status()
         data = resp.json()
         if data.get("success"):
             return {"status": "success", "user_data": data.get("user_data")}
-        raise HTTPException(status_code=401, detail=data.get("message", "Authentification échouée."))
-    except requests.exceptions.RequestException as e:
-        print(f"Erreur de communication avec Apps Script: {e}")
-        raise HTTPException(status_code=500, detail="Erreur serveur JEL DEM lors de l'authentification.")
+        raise HTTPException(status_code=401, detail=data.get("message", "Identifiants incorrects"))
+    except Exception as e:
+        print(f"Erreur login server: {e}")
+        raise HTTPException(status_code=500, detail="Erreur de communication avec la base de données")
 
 
 @app.post("/api/update_password")

@@ -90,7 +90,7 @@ function doPost(e) {
          MailApp.sendEmail(email, subject, body);
        }
        
-       result = { userId: newId };
+       result = { success: true, userId: newId };
 
     } else if (action === 'assignRfid') {
        let sheet = ss.getSheetByName("Utilisateurs");
