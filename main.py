@@ -1,6 +1,7 @@
 import base64
 import os
 import json # Pour sauvegarder les données
+import csv
 import io
 import math
 import datetime
@@ -9,13 +10,20 @@ import mediapipe as mp # Pour la détection des mains
 import numpy as np
 import requests # Nouvelle importation
 import time
+from fastapi.middleware.cors import CORSMiddleware
+import socket
 import asyncio
+try:
+    import qrcode
+except ImportError:
+    qrcode = None
 import pickle # Pour sauvegarder l'index sur le disque
 import threading # Pour le multitâche fluide
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, FileResponse
 from groq import Groq
 from PIL import Image, ImageDraw, ImageFont # Pour dessiner sur les images
 from ultralytics import YOLO # Moteur de vision
@@ -26,8 +34,23 @@ load_dotenv()
 
 # --- CONFIGURATION DU SYSTÈME ---
 
+# --- DÉTECTION DE L'IP LOCALE POUR LES QR CODES ---
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # n'a pas besoin d'être joignable
+        s.connect(('10.255.255.255', 1))
+        IP = s.getsockname()[0]
+    except Exception:
+        IP = '127.0.0.1'
+    finally:
+        s.close()
+    return IP
+
+LOCAL_IP = get_local_ip()
+
 # 1. URL DE VOTRE API GOOGLE APPS SCRIPT
-APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwL6H6QU5ZnwROIRqM84fkn01xehLLRChP9a9HJNTvY97b6irjePXtd4xeADHfAx8xWJA/exec"
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxGjUmpz3yBSJpfZ9fvZsg8zIxsqSS8jRWEIA04uX3_5dWdmyAnqExj18RqtMPhyRupxA/exec"
 
 # La base de données des produits sera maintenant gérée dans Google Sheets
 # Elle est chargée au démarrage depuis Google Apps Script
@@ -67,7 +90,34 @@ async def lifespan(app: FastAPI):
     t.start()
     yield
 
+# --- INITIALISATION UNIQUE DE L'APPLICATION ---
 app = FastAPI(lifespan=lifespan)
+
+# --- GESTION DES TRANSACTIONS LOCALES (POUR EXPORT) ---
+TRANSACTIONS_FILE = "transactions_history.json"
+
+def save_transaction_local(payload):
+    """Sauvegarde une copie locale de la transaction pour l'export CSV."""
+    history = []
+    if os.path.exists(TRANSACTIONS_FILE):
+        with open(TRANSACTIONS_FILE, "r") as f:
+            try:
+                history = json.load(f)
+            except:
+                history = []
+    
+    payload["timestamp"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    history.append(payload)
+    with open(TRANSACTIONS_FILE, "w") as f:
+        json.dump(history, f, indent=4)
+
+# --- CONFIGURATION CORS (Indispensable pour DALL JAMM) ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # En production, remplacez par vos domaines Vercel/GitHub
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- CHARGEMENT DU MODÈLE YOLO (Le Cerveau) ---
 try:
@@ -125,6 +175,11 @@ LAST_DETECTIONS = {} # Pour garder les rectangles en mémoire entre deux analyse
 # On y stocke aussi maintenant le "vrai nom" identifié par matching visuel
 SHELF_STATE = {}
 
+# --- MÉMOIRE DE TRACKING INDIVIDUEL ---
+# Associe un track_id YOLO (personne) à un nom identifié
+PERSON_TRACK_MEMORY = {} # {cam_id: {track_id: "Nom"}}
+PERSON_ID_ATTEMPTS = {} # Pour ne pas spammer la reco faciale si échec
+
 # --- CHARGEMENT DES VISAGES CONNUS ---
 KNOWN_FACE_ENCODINGS = []
 KNOWN_FACE_NAMES = []
@@ -173,6 +228,12 @@ load_known_faces()
 # NOUVEAU SYSTÈME FLANN POUR GRANDE ÉCHELLE (10,000+ Objets)
 FLANN_INDEX_LSH = 6
 # Paramètres optimisés pour les descripteurs binaires ORB
+
+# SEUIL DE STRICTITUDE COULEUR (Bhattacharyya)
+# Plus la valeur est BASSE, plus le système est STRICT (0.0 = identique)
+COLOR_STRICTNESS_THRESHOLD = 0.5
+
+KNOWN_PRODUCT_SPECTRAL = {} # Stockage des signatures couleurs
 INDEX_PARAMS = dict(algorithm=FLANN_INDEX_LSH, table_number=6, key_size=12, multi_probe_level=1)
 SEARCH_PARAMS = dict(checks=50) # Nombre de vérifications (plus haut = plus précis mais plus lent)
 
@@ -184,7 +245,7 @@ ORB = cv2.ORB_create(nfeatures=3000) # Augmenté encore pour capter les moindres
 
 def load_known_products(force_reload=False):
     """Apprend les produits enregistrés dans le dossier dataset sans entraînement."""
-    global PRODUCT_FLANN_MATCHER, KNOWN_PRODUCT_NAMES_LIST
+    global PRODUCT_FLANN_MATCHER, KNOWN_PRODUCT_NAMES_LIST, KNOWN_PRODUCT_SPECTRAL
     folder = "produits_dataset"
     cache_file = "products_index.pkl"
 
@@ -200,6 +261,7 @@ def load_known_products(force_reload=False):
                 data = pickle.load(f)
                 KNOWN_PRODUCT_NAMES_LIST = data["names"]
                 descriptors_list = data["descriptors"]
+                KNOWN_PRODUCT_SPECTRAL = data.get("spectral", {})
             # On recrée juste le moteur de recherche (très rapide)
             if descriptors_list:
                 PRODUCT_FLANN_MATCHER = cv2.FlannBasedMatcher(INDEX_PARAMS, SEARCH_PARAMS)
@@ -213,6 +275,7 @@ def load_known_products(force_reload=False):
     print("🔄 Indexation haute performance des produits (FLANN)...")
     KNOWN_PRODUCT_NAMES_LIST = []
     descriptors_list = [] # Liste pour FLANN
+    KNOWN_PRODUCT_SPECTRAL = {}
 
     for filename in os.listdir(folder):
         if filename.lower().endswith((".jpg", ".png", ".jpeg")):
@@ -224,11 +287,17 @@ def load_known_products(force_reload=False):
                 img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
                 if img is None: continue
                 
+                # Lecture couleur pour la signature spectrale
+                img_color = cv2.imread(img_path)
+                sig = analyze_spectral_signature(img_color)
+                
                 # Calcul de la signature numérique (Descripteurs)
                 kp, des = ORB.detectAndCompute(img, None)
                 if des is not None and len(des) > 5: # On ignore les images trop pauvres en détails
                     descriptors_list.append(des)
                     KNOWN_PRODUCT_NAMES_LIST.append(name)
+                    if sig:
+                        KNOWN_PRODUCT_SPECTRAL[name] = sig
             except Exception as e:
                 print(f"Erreur lecture produit {filename}: {e}")
     
@@ -237,7 +306,11 @@ def load_known_products(force_reload=False):
         try:
             # SAUVEGARDE SUR LE DISQUE (Pour la prochaine fois)
             with open(cache_file, "wb") as f:
-                pickle.dump({"names": KNOWN_PRODUCT_NAMES_LIST, "descriptors": descriptors_list}, f)
+                pickle.dump({
+                    "names": KNOWN_PRODUCT_NAMES_LIST, 
+                    "descriptors": descriptors_list,
+                    "spectral": KNOWN_PRODUCT_SPECTRAL
+                }, f)
             
             PRODUCT_FLANN_MATCHER = cv2.FlannBasedMatcher(INDEX_PARAMS, SEARCH_PARAMS)
             PRODUCT_FLANN_MATCHER.add(descriptors_list)
@@ -251,13 +324,50 @@ def load_known_products(force_reload=False):
 
 load_known_products()
 
+def analyze_spectral_signature(crop_img):
+    """
+    Simule une analyse multi-spectrale en calculant la signature 
+    colorimétrique unique de l'objet sur plusieurs canaux.
+    """
+    try:
+        # 1. NORMALISATION DE L'ÉCLAIRAGE (CLAHE)
+        # On passe en LAB pour traiter la luminance (L) sans toucher aux couleurs (A, B)
+        lab = cv2.cvtColor(crop_img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        
+        # Appliquer CLAHE sur le canal de luminosité
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        cl = clahe.apply(l)
+        
+        # Re-fusionner et convertir en HSV pour l'analyse spectrale
+        limg = cv2.merge((cl, a, b))
+        final_bgr = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+        hsv = cv2.cvtColor(final_bgr, cv2.COLOR_BGR2HSV)
+        
+        # Calcul des histogrammes pour les 3 canaux
+        hist_h = cv2.calcHist([hsv], [0], None, [180], [0, 180])
+        hist_s = cv2.calcHist([hsv], [1], None, [256], [0, 256])
+        
+        # Normalisation pour l'indépendance à la taille
+        cv2.normalize(hist_h, hist_h, 0, 1, cv2.NORM_MINMAX)
+        cv2.normalize(hist_s, hist_s, 0, 1, cv2.NORM_MINMAX)
+        
+        return {
+            "hue": hist_h,
+            "sat": hist_s,
+            "mean_color": np.mean(final_bgr, axis=(0, 1)).tolist()
+        }
+    except:
+        return None
+
 def identify_product_in_crop(crop_img_pil):
     """Compare une image découpée avec les produits connus."""
     if PRODUCT_FLANN_MATCHER is None or not KNOWN_PRODUCT_NAMES_LIST: return None
     
     # Conversion PIL -> OpenCV Gris
-    crop = np.array(crop_img_pil)
-    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    crop_np = np.array(crop_img_pil)
+    crop_bgr = cv2.cvtColor(crop_np, cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
     
     # Si l'image est trop petite ou floue, on ne tente rien (évite les faux positifs)
     if gray.shape[0] < 50 or gray.shape[1] < 50:
@@ -289,9 +399,20 @@ def identify_product_in_crop(crop_img_pil):
             best_product = max(votes, key=votes.get)
             score = votes[best_product]
             
-            # SEUIL DE SÉCURITÉ : Au moins 8 points de détails uniques concordants
-            if score >= 6: # Légèrement assoupli pour détecter plus facilement si l'objet bouge
-                return best_product
+            # --- VALIDATION PAR HISTOGRAMME DE COULEUR ---
+            if score >= 6 and best_product in KNOWN_PRODUCT_SPECTRAL:
+                current_sig = analyze_spectral_signature(crop_bgr)
+                ref_sig = KNOWN_PRODUCT_SPECTRAL[best_product]
+                
+                # Comparaison de l'histogramme de Teinte (Hue)
+                # 0 = identique, 1 = totalement différent (Bhattacharyya)
+                dist = cv2.compareHist(current_sig['hue'], ref_sig['hue'], cv2.HISTCMP_BHATTACHARYYA)
+                
+                # Validation basée sur le seuil configuré
+                if dist < COLOR_STRICTNESS_THRESHOLD:
+                    return best_product
+                else:
+                    print(f"🔍 Rejet par couleur pour {best_product} (dist: {dist:.2f})")
                 
     except Exception as e:
         # print(f"Erreur Matching: {e}") 
@@ -315,27 +436,34 @@ def sync_products_from_google():
         print(f"⚠️ Impossible de joindre Google Sheets : {e}")
 
 # --- MOTEUR D'ANALYSE EN ARRIÈRE-PLAN (THREAD) ---
+# Utilisation d'un Pool de Threads pour traiter 4 caméras en parallèle
+AI_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+PROCESSING_CAMS = set() # Pour éviter d'analyser deux fois la même caméra en même temps
+
+def run_ai_analysis(cam_id, img_bytes):
+    """Exécute l'IA pour une caméra spécifique."""
+    try:
+        img_pil = Image.open(io.BytesIO(img_bytes))
+        LAST_DETECTIONS[cam_id] = process_pick_and_go_logic(cam_id, img_pil)
+    except Exception as e:
+        print(f"Erreur analyse frame {cam_id}: {e}")
+    finally:
+        PROCESSING_CAMS.discard(cam_id)
+
 def background_analysis_loop():
     """Ce processus tourne tout seul et analyse les images sans bloquer la vidéo."""
     print("🚀 Moteur IA démarré en arrière-plan (Mode Fluide).")
     while True:
         try:
-            # On prend la liste des caméras actives
             active_cams = list(LATEST_FRAME_BYTES.keys())
-            
             for cam_id in active_cams:
-                # On récupère la dernière image brute reçue
-                img_bytes = LATEST_FRAME_BYTES.get(cam_id)
-                if img_bytes and MODEL is not None:
-                    try:
-                        # On lance l'analyse IA
-                        img_pil = Image.open(io.BytesIO(img_bytes))
-                        LAST_DETECTIONS[cam_id] = process_pick_and_go_logic(cam_id, img_pil)
-                    except Exception as e:
-                        print(f"Erreur analyse frame: {e}") # Affiche l'erreur au lieu de l'ignorer
+                if cam_id not in PROCESSING_CAMS:
+                    img_bytes = LATEST_FRAME_BYTES.get(cam_id)
+                    if img_bytes and MODEL is not None:
+                        PROCESSING_CAMS.add(cam_id)
+                        AI_EXECUTOR.submit(run_ai_analysis, cam_id, img_bytes)
             
-            # Petite pause pour laisser respirer le processeur (environ 30 FPS pour l'IA)
-            time.sleep(0.03)
+            time.sleep(0.01) # Fréquence de scrutation élevée
         except Exception as e:
             print(f"Erreur Thread IA: {e}")
             time.sleep(1)
@@ -442,33 +570,150 @@ def draw_overlays(image_bytes, text_lines):
 
 @app.get("/")
 async def root():
+    """Sert la page d'accueil moderne DALL JAMM."""
+    if os.path.exists("index.html"):
+        with open("index.html", "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return RedirectResponse(url="/admin")
 
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head><title>HYFLEX - HUB</title>
-    <style>
-        body { background: #111; color: white; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-        .btn { display: block; width: 250px; padding: 20px; margin: 10px; text-align: center; text-decoration: none; font-size: 1.2em; border-radius: 8px; font-weight: bold; transition: 0.3s; }
-        .client { background: #00f2ff; color: #000; }
-        .manager { background: #ff9900; color: #000; }
-        .admin { background: #00ff41; color: #000; }
-        .mobile { background: #333; color: #fff; border: 1px solid #555; }
-        .register { background: #fff; color: #000; border: 2px solid #00f2ff; }
-        .btn:hover { transform: scale(1.05); filter: brightness(1.2); }
-    </style>
-    </head>
-    <body>
-        <h1 style="margin-bottom: 40px;">🛡️ HYFLEX SYSTEM</h1>
-        <a href="/client" class="btn client">👤 ESPACE CLIENT (Wallet)</a>
-        <a href="/manager" class="btn manager">🛠️ ESPACE MANAGER</a>
-        <a href="/admin" class="btn admin">👁️ ESPACE ADMIN (CCTV)</a>
-        <a href="/mobile" class="btn mobile">📱 CAMERA MOBILE</a>
-        <a href="/register" class="btn register">📝 S'INSCRIRE (FACE ID)</a>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html)
+@app.get("/api/export_transactions")
+async def export_transactions():
+    """Génère et télécharge un fichier CSV des transactions du jour."""
+    if not os.path.exists(TRANSACTIONS_FILE):
+        return {"error": "Aucune transaction enregistrée."}
+    
+    with open(TRANSACTIONS_FILE, "r") as f:
+        data = json.load(f)
+    
+    output_file = f"export_transactions_{datetime.date.today()}.csv"
+    with open(output_file, "w", newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=["timestamp", "userID", "produit", "montant", "action", "camera"])
+        writer.writeheader()
+        writer.writerows(data)
+            
+    return FileResponse(output_file, media_type="text/csv", filename=output_file)
+
+@app.get("/client_frontend", response_class=HTMLResponse)
+async def client_frontend_interface():
+    """Sert l'interface client moderne (frontend/client.html)."""
+    with open("frontend/client.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+@app.get("/manager_frontend", response_class=HTMLResponse)
+async def manager_frontend_interface():
+    """Sert l'interface manager moderne (frontend/manager.html)."""
+    with open("frontend/manager.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+@app.get("/api/client_data/{user_id}")
+async def get_client_data(user_id: str):
+    """API pour récupérer les données d'un client (solde, transactions)."""
+    if user_id not in WALLETS:
+        raise HTTPException(status_code=404, detail="Client non trouvé")
+    
+    client_transactions = []
+    if os.path.exists(TRANSACTIONS_FILE):
+        with open(TRANSACTIONS_FILE, "r") as f:
+            try:
+                all_transactions = json.load(f)
+                for t in all_transactions:
+                    if t.get("userID") == user_id:
+                        client_transactions.append(t)
+            except:
+                pass # Fichier vide ou corrompu
+    
+    return {
+        "name": user_id,
+        "balance": WALLETS[user_id],
+        "transactions": client_transactions
+    }
+
+@app.get("/api/products_data")
+async def get_products_data():
+    """API pour récupérer la liste des produits."""
+    products_list = []
+    for name, price in DB_PRODUITS.items():
+        products_list.append({"name": name.capitalize(), "price": price})
+    return products_list
+
+@app.post("/api/login")
+async def api_login(phone: str = Form(...), password: str = Form(...)):
+    """Vérifie les identifiants et renvoie les données du client."""
+    # Dans un cas réel, on interroge Google Sheets. 
+    # Pour la rapidité, on utilise l'API Apps Script existante pour récupérer les infos
+    # Ce code est désactivé car la logique de login a été migrée vers Apps Script
+    # et est appelée directement depuis le frontend ou par l'endpoint rfid_login
+    # Cette fonction ne devrait pas être appelée directement par le frontend client_v2.html
+    # mais sert juste de placeholder ou d'ancienne version. La vraie logique de login est dans Apps Script.
+    # Pour des raisons de compatibilité et clarté, nous allons la faire pointer vers Apps Script aussi.
+    payload = {"action": "login", "payload": {"phone": phone, "password": password}}
+    try:
+        # On récupère les données via l'endpoint existant qui agrège solde et transactions
+        res = requests.get(f"http://localhost:8000/api/client_data/{phone}")
+        if res.status_code == 200:
+            user_data = res.json()
+            # Note: Le mot de passe devrait être vérifié ici. 
+            # Si votre WALLETS contient les passwords ou si Apps Script les renvoie :
+            # if user_data.get('password') == password:
+            return {"status": "success", "user_data": user_data}
+        
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("success"):
+            return {"status": "success", "user_data": data.get("user_data")}
+        raise HTTPException(status_code=401, detail=data.get("message", "Authentification échouée."))
+    except requests.exceptions.RequestException as e:
+        print(f"Erreur de communication avec Apps Script: {e}")
+        raise HTTPException(status_code=500, detail="Erreur serveur JEL DEM lors de l'authentification.")
+
+
+@app.post("/api/update_password")
+async def api_update_password(phone: str = Form(...), new_password: str = Form(...)):
+    """Met à jour le mot de passe de l'utilisateur via Apps Script."""
+    try:
+        payload = {
+            "action": "updatePassword",
+            "payload": {"phone": phone, "newPassword": new_password}
+        }
+        threading.Thread(target=lambda: requests.post(APPS_SCRIPT_URL, json=payload), daemon=True).start()
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/add_product_api")
+async def add_product_api(product_name: str = Form(...), price: int = Form(...)):
+    """API pour ajouter un produit depuis le frontend manager."""
+    if add_product_to_google(product_name, price):
+        # Recharger les produits pour que le système d'IA les connaisse
+        load_known_products(force_reload=True)
+        return {"status": "success", "message": "Produit ajouté avec succès"}
+    else:
+        raise HTTPException(status_code=500, detail="Erreur lors de l'ajout du produit")
+
+@app.post("/api/register_simple_api")
+async def api_register_simple_api(name: str = Form(...), email: str = Form(""), balance: int = Form(5000)):
+    """API d'inscription simple sans photo, utilisée par le frontend."""
+    try:
+        WALLETS[name] = balance
+        save_wallets()
+        
+        payload = {
+            "action": "registerUser",
+            "payload": {"name": name, "email": email, "balance": balance}
+        }
+        threading.Thread(target=lambda: requests.post(APPS_SCRIPT_URL, json=payload), daemon=True).start()
+        
+        return {"status": "success", "userId": name}
+    except Exception as e:
+   lesp "é  dev kit u ddi  VOI PREMIEREEMEN TLES FOCN TION POU RMMMMFIQR LEREAUU JTTPP  QPP SC RITP CQ  CES T VELEC  C QIL RE ERILIR QU SYNTHEMME ET MTN     ET "     raise HTTPException(status_code=500, detail=str(e))
+
+# Mise à jour des liens dans le Hub pour pointer vers les nouvelles interfaces
+app.get("/client")(lambda: RedirectResponse(url="/client_frontend"))
+app.get("/manager")(lambda: RedirectResponse(url="/manager_frontend"))
 
 @app.get("/register", response_class=HTMLResponse)
 async def register_interface():
@@ -480,13 +725,13 @@ async def register_interface():
     <title>HYFLEX - INSCRIPTION</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { background: #050505; color: #fff; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-        .container { width: 90%; max-width: 400px; background: #111; padding: 25px; border: 1px solid #333; border-radius: 12px; box-shadow: 0 0 30px rgba(0, 242, 255, 0.15); text-align: center; }
+        body {{ background: #0a0a0b; color: #fff; font-family: 'Inter', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }}
+        .container {{ width: 92%; max-width: 420px; background: rgba(20, 20, 25, 0.8); backdrop-filter: blur(10px); padding: 30px; border: 1px solid #222; border-radius: 20px; box-shadow: 0 20px 50px rgba(0,0,0,0.5); text-align: center; }}
         h1 { color: #00f2ff; margin-bottom: 20px; font-size: 1.6em; text-transform: uppercase; letter-spacing: 2px; font-weight: 800; }
-        input { width: 100%; padding: 15px; margin: 10px 0; background: #222; border: 1px solid #444; color: white; border-radius: 8px; box-sizing: border-box; font-size: 1.1em; text-align: center; }
+        input {{ width: 100%; padding: 15px; margin: 10px 0; background: #16161a; border: 1px solid #333; color: white; border-radius: 12px; box-sizing: border-box; font-size: 1.1em; text-align: center; transition: 0.3s; }}
         input:focus { border-color: #00f2ff; outline: none; background: #1a1a1a; }
-        #video-box { width: 100%; height: 320px; background: #000; border: 2px solid #333; margin-bottom: 20px; position: relative; overflow: hidden; border-radius: 8px; }
-        video { width: 100%; height: 100%; object-fit: cover; }
+        #video-box {{ width: 100%; height: 320px; background: #000; border: 1px solid #00f2ff; margin-bottom: 20px; position: relative; overflow: hidden; border-radius: 15px; }}
+        video {{ width: 100%; height: 100%; object-fit: cover; filter: brightness(1.1); }}
         .btn { background: #00f2ff; color: #000; border: none; padding: 15px; width: 100%; font-weight: bold; font-size: 1.2em; border-radius: 8px; cursor: pointer; text-transform: uppercase; transition: 0.3s; margin-top: 10px; display: block; }
         .btn:hover { background: #fff; box-shadow: 0 0 20px #00f2ff; transform: scale(1.02); }
         .status { margin-top: 20px; font-size: 1em; color: #aaa; font-weight: 500; }
@@ -500,6 +745,7 @@ async def register_interface():
         .guide-overlay { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 5px 10px; border-radius: 4px; color: #00f2ff; font-weight: bold; pointer-events: none; }
         .progress-bar { width: 100%; height: 5px; background: #333; margin-top: 10px; border-radius: 3px; overflow: hidden; }
         .progress-fill { height: 100%; background: #00f2ff; width: 0%; transition: width 0.3s; }
+        .back-hub {{ margin-top: 25px; display: block; color: #555; text-decoration: none; font-size: 0.8em; }}
     </style>
     </head>
     <body>
@@ -515,6 +761,7 @@ async def register_interface():
             <button class="btn" id="btn-action" onclick="startSequence()">COMMENCER LE SCAN</button>
             <div class="status" id="status">En attente de saisie...</div>
             <div id="qr-result" class="qr-box"></div>
+            <a href="/" class="back-hub">Hub Principal</a>
         </div>
         <canvas id="cvs" style="display:none"></canvas>
         <script>
@@ -611,6 +858,88 @@ async def register_interface():
     """
     return HTMLResponse(content=html)
 
+@app.get("/register_simple", response_class=HTMLResponse)
+async def register_simple_interface():
+    """Interface d'inscription classique (Nom, Email, Solde)."""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <title>HYFLEX - INSCRIPTION CLASSIQUE</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { background: #050505; color: #fff; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        .container { width: 90%; max-width: 400px; background: #111; padding: 25px; border: 1px solid #333; border-radius: 12px; box-shadow: 0 0 30px rgba(255, 153, 0, 0.15); text-align: center; }
+        h1 { color: #ff9900; margin-bottom: 20px; font-size: 1.6em; text-transform: uppercase; letter-spacing: 2px; font-weight: 800; }
+        input { width: 100%; padding: 15px; margin: 10px 0; background: #222; border: 1px solid #444; color: white; border-radius: 8px; box-sizing: border-box; font-size: 1.1em; text-align: center; }
+        input:focus { border-color: #ff9900; outline: none; background: #1a1a1a; }
+        .btn { background: #ff9900; color: #000; border: none; padding: 15px; width: 100%; font-weight: bold; font-size: 1.2em; border-radius: 8px; cursor: pointer; text-transform: uppercase; transition: 0.3s; margin-top: 10px; display: block; }
+        .btn:hover { background: #fff; box-shadow: 0 0 20px #ff9900; transform: scale(1.02); }
+        .status { margin-top: 20px; font-size: 1em; color: #aaa; }
+        .back-link { margin-top: 20px; display: block; color: #00f2ff; text-decoration: none; font-size: 0.9em; }
+    </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>📝 NOUVEAU CLIENT</h1>
+            <form id="regForm">
+                <input type="text" id="name" name="name" placeholder="NOM COMPLET" required>
+                <input type="email" id="email" name="email" placeholder="EMAIL (OPTIONNEL)">
+                <input type="number" id="balance" name="balance" placeholder="SOLDE INITIAL (FCFA)" value="5000">
+                <button type="submit" class="btn">CRÉER LE COMPTE</button>
+            </form>
+            <div class="status" id="status"></div>
+            <a href="/" class="back-link">⬅ Retour au Hub</a>
+        </div>
+        <script>
+            document.getElementById('regForm').onsubmit = async (e) => {
+                e.preventDefault();
+                const status = document.getElementById('status');
+                status.innerText = "⏳ Inscription en cours...";
+                
+                const formData = new FormData();
+                formData.append('name', document.getElementById('name').value);
+                formData.append('email', document.getElementById('email').value);
+                formData.append('balance', document.getElementById('balance').value);
+                
+                try {
+                    const res = await fetch('/api/register_simple', { method: 'POST', body: formData });
+                    const data = await res.json();
+                    if(data.status === 'success') {
+                        status.innerHTML = "<span style='color:#00ff41'>✅ Client enregistré !</span>";
+                        document.getElementById('regForm').reset();
+                    } else {
+                        status.innerHTML = "<span style='color:#ff3333'>❌ Erreur: " + data.message + "</span>";
+                    }
+                } catch(e) {
+                    status.innerHTML = "<span style='color:#ff3333'>❌ Erreur réseau</span>";
+                }
+            };
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+@app.post("/api/register_simple")
+async def api_register_simple(name: str = Form(...), email: str = Form(""), balance: int = Form(5000)):
+    """API d'inscription simple sans photo."""
+    try:
+        # Mise à jour locale du Wallet
+        WALLETS[name] = balance
+        save_wallets()
+        
+        # Synchronisation avec Google Sheets (Action registerUser existante dans Apps Script)
+        payload = {
+            "action": "registerUser",
+            "payload": {"name": name, "email": email, "balance": balance}
+        }
+        threading.Thread(target=lambda: requests.post(APPS_SCRIPT_URL, json=payload), daemon=True).start()
+        
+        return {"status": "success", "userId": name}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 def blocking_face_check(content):
     """Vérification synchrone du visage pour éviter de bloquer le serveur."""
     try:
@@ -669,11 +998,14 @@ def identify_person_in_image(image_input):
             image_input = np.array(image_input)
             
         unknown_image = face_recognition.load_image_file(image_input) if not isinstance(image_input, np.ndarray) else image_input
-        unknown_encodings = face_recognition.face_encodings(unknown_image)
+        
+        # AMÉLIORATION DISTANCE : On demande à chercher des visages plus petits (upsample=2)
+        face_locations = face_recognition.face_locations(unknown_image, number_of_times_to_upsample=2)
+        unknown_encodings = face_recognition.face_encodings(unknown_image, face_locations)
 
         if unknown_encodings:
             face_encoding = unknown_encodings[0]
-            matches = face_recognition.compare_faces(KNOWN_FACE_ENCODINGS, face_encoding, tolerance=0.5)
+            matches = face_recognition.compare_faces(KNOWN_FACE_ENCODINGS, face_encoding, tolerance=0.5) # Ajusté pour la distance
             if True in matches:
                 first_match_index = matches.index(True)
                 return KNOWN_FACE_NAMES[first_match_index]
@@ -690,6 +1022,7 @@ def log_transaction_via_api(payload):
             "action": "logTransaction",
             "payload": payload
         }
+        save_transaction_local(payload) # Sauvegarde locale pour l'export CSV
         response = requests.post(APPS_SCRIPT_URL, json=api_payload)
         response.raise_for_status() # Lève une erreur si le statut n'est pas 200
         print(f"✅ Transaction enregistrée sur Google Sheets: {response.json()}")
@@ -717,41 +1050,49 @@ def process_pick_and_go_logic(camera_id, img):
     detections_to_draw = []
     person_count = 0
     
-    # --- INTELLIGENCE FACIALE (RECONNAISSANCE IMMEDIATE) ---
-    if FACE_REC_AVAILABLE:
-        try:
-            # 1. Optimisation : On réduit l'image par 4 pour la vitesse (CPU friendly)
-            small_frame = cv2.resize(img_cv, (0, 0), fx=0.25, fy=0.25)
-            
-            # 2. Détection des visages sur l'image réduite
-            # Note: face_recognition travaille en RGB, ce qui est déjà le cas de img_cv (issu de PIL)
-            face_locations = face_recognition.face_locations(small_frame)
-            face_encodings = face_recognition.face_encodings(small_frame, face_locations)
+    # --- ÉTAPE 1 : TRACKING YOLO ---
+    res = None
+    try:
+        results = MODEL.track(img, persist=True, verbose=False, conf=0.3, iou=0.5, tracker="botsort.yaml")
+        res = results[0]
+    except Exception:
+        return []
 
-            for face_encoding, face_location in zip(face_encodings, face_locations):
-                # 3. Identification
-                matches = face_recognition.compare_faces(KNOWN_FACE_ENCODINGS, face_encoding, tolerance=0.5)
-                name = "Inconnu"
-                face_distances = face_recognition.face_distance(KNOWN_FACE_ENCODINGS, face_encoding)
+    # Dictionnaires temporaires pour cette frame
+    person_boxes_ids = [] # List of (box, track_id)
+    
+    # --- ÉTAPE 2 : IDENTIFICATION DES PERSONNES ET LIEN TRACK_ID ---
+    if res.boxes.id is not None:
+        boxes = res.boxes.xyxy.cpu().numpy().astype(int)
+        ids = res.boxes.id.cpu().numpy().astype(int)
+        cls = res.boxes.cls.cpu().numpy().astype(int)
+        
+        for box, tid, cid in zip(boxes, ids, cls):
+            if res.names[cid] == "person":
+                person_count += 1
+                person_boxes_ids.append((box, tid))
                 
-                if len(face_distances) > 0:
-                    best_match_index = np.argmin(face_distances)
-                    if matches[best_match_index]:
-                        name = KNOWN_FACE_NAMES[best_match_index]
-                        # ASSIGNATION AUTOMATIQUE DE LA CAMÉRA À L'UTILISATEUR RECONNU
-                        CAMERA_USER_ASSIGNMENTS[camera_id] = name
+                # Si on ne connaît pas encore le nom de cet ID de tracking
+                if camera_id not in PERSON_TRACK_MEMORY: PERSON_TRACK_MEMORY[camera_id] = {}
+                
+                # Optimisation : On ne tente l'identification que 10 fois max ou si pas encore reconnu
+                if tid not in PERSON_TRACK_MEMORY[camera_id] or PERSON_TRACK_MEMORY[camera_id][tid] == "Client_Unknown":
+                    attempts = PERSON_ID_ATTEMPTS.get(f"{camera_id}_{tid}", 0)
+                    if attempts < 10: # On tente sur les 10 premières secondes de visibilité
+                        p_crop = img.crop((box[0], box[1], box[2], box[3]))
+                        name = identify_person_in_image(p_crop)
+                        if name != "Client_Unknown":
+                            PERSON_TRACK_MEMORY[camera_id][tid] = name
+                        PERSON_ID_ATTEMPTS[f"{camera_id}_{tid}"] = attempts + 1
+                    elif tid not in PERSON_TRACK_MEMORY[camera_id]:
+                        # Si après 5 essais on ne sait pas, on marque inconnu pour cette session
+                        name = "Client_Unknown"
+                        PERSON_TRACK_MEMORY[camera_id][tid] = name
 
-                # 4. Dessin du cadre (On remet les coordonnées à l'échelle x4)
-                top, right, bottom, left = face_location
-                color = "#00f2ff" if name != "Inconnu" else "#FF0000"
-                detections_to_draw.append({
-                    "type": "box",
-                    "box": [left * 4, top * 4, right * 4, bottom * 4],
-                    "label": f"👤 {name}",
-                    "color": color
-                })
-        except Exception as e:
-            print(f"Erreur process facial: {e}")
+    # --- ÉTAPE 3 : DÉTECTION DES MAINS ET LIEN AVEC LES PERSONNES ---
+    hand_to_person_track_id = {} # {hand_index: person_track_id}
+    if FACE_REC_AVAILABLE:
+        pass # (Logique face recognition déplacée plus haut dans le tracking)
 
     hand_positions = [] # Pour stocker le bout des doigts (Index)
     is_grabbing_list = [] # Pour savoir si chaque main est fermée (pinch)
@@ -777,15 +1118,16 @@ def process_pick_and_go_logic(camera_id, img):
                 # Si distance < 0.1 (10% de l'image), on considère que la main tient quelque chose
                 hand_positions.append((int(index_tip.x * width), int(index_tip.y * height)))
                 is_grabbing_list.append(distance < 0.1) 
-    
-    # 2. DÉTECTION ET TRACKING OBJETS (YOLO)
-    # conf=0.4 signifie qu'on ignore les détections avec moins de 40% de certitude
-    results = MODEL.track(img, persist=True, verbose=False, conf=0.3, iou=0.5)
-    res = results[0]
-    
-    # Initialiser l'état pour cette caméra si inexistant
-    if camera_id not in SHELF_STATE:
-        SHELF_STATE[camera_id] = {}
+                
+                # Trouver à quelle personne appartient cette main
+                hx, hy = int(index_tip.x * width), int(index_tip.y * height)
+                for p_box, p_tid in person_boxes_ids:
+                    if p_box[0] < hx < p_box[2] and p_box[1] < hy < p_box[3]:
+                        hand_to_person_track_id[len(hand_positions)-1] = p_tid
+                        break
+
+    # --- ÉTAPE 4 : LOGIQUE PRODUITS ET INTERACTIONS ---
+    if camera_id not in SHELF_STATE: SHELF_STATE[camera_id] = {}
     
     current_visible_ids = set()
     
@@ -799,23 +1141,14 @@ def process_pick_and_go_logic(camera_id, img):
             name = res.names[class_id]
             x1, y1, x2, y2 = box
             
-            # IGNORER LES HUMAINS DANS LE SYSTÈME D'ACHAT
             if name == "person":
-                continue
+                # Dessiner le cadre de la personne identifiée
+                p_name = PERSON_TRACK_MEMORY.get(camera_id, {}).get(track_id, "Inconnu")
+                detections_to_draw.append({"type": "box", "box": box, "label": f"👤 {p_name}", "color": "#00f2ff" if p_name != "Inconnu" else "#fff"})
+                continue # On ne traite pas l'humain comme un produit à acheter
                 
+            # GESTION DES PRODUITS
             current_visible_ids.add(track_id)
-            
-            # COMPTAGE ET IDENTIFICATION DES PERSONNES
-            if name == "person":
-                person_count += 1
-                # On ajoute quand même le dessin pour l'humain si la reco faciale n'a pas déjà mis un label
-                detections_to_draw.append({
-                    "type": "box",
-                    "box": box,
-                    "label": "👤 HUMAIN",
-                    "color": "#FFFFFF"
-                })
-                continue
 
             # Mise à jour / Ajout dans la mémoire
             if track_id not in SHELF_STATE[camera_id]:
@@ -825,20 +1158,20 @@ def process_pick_and_go_logic(camera_id, img):
                 "last_seen": time.time()
             }
             
-            # --- INTELLIGENCE PRODUIT INSTANTANÉE ---
-            # Si l'objet est générique (ex: bottle), on essaie de trouver la marque exacte
-            # On ne le fait que si on ne l'a pas encore identifié
+            # --- IDENTIFICATION SPECTRAL-TEXTURE (OBJET PAR OBJET) ---
             current_label = SHELF_STATE[camera_id][track_id].get("real_label", name)
             
-            # Modification pour accepter n'importe quel objet détecté (sauf les humains) comme candidat produit
             if current_label != "person" and len(KNOWN_PRODUCT_NAMES_LIST) > 0:
-                # On découpe l'objet dans l'image
                 try:
                     crop = img.crop((x1, y1, x2, y2))
-                    # On cherche une correspondance
+                    crop_cv = cv2.cvtColor(np.array(crop), cv2.COLOR_RGB2BGR)
+                    
+                    # Signature "Multi-spectrale" (Couleur + Texture)
+                    spectral = analyze_spectral_signature(crop_cv)
+                    
+                    # Correspondance FLANN
                     detected_product = identify_product_in_crop(crop)
                     if detected_product:
-                        # BINGO ! On remplace "bottle" par "coca"
                         SHELF_STATE[camera_id][track_id]["real_label"] = detected_product
                         current_label = detected_product
                 except Exception:
@@ -852,12 +1185,15 @@ def process_pick_and_go_logic(camera_id, img):
             obj_cx = (x1 + x2) // 2
             obj_cy = (y1 + y2) // 2
             
-            for (hx, hy), grabbing in zip(hand_positions, is_grabbing_list):
+            for h_idx, ((hx, hy), grabbing) in enumerate(zip(hand_positions, is_grabbing_list)):
                 # Si le doigt est à l'intérieur de la boîte de l'objet
                 if x1 < hx < x2 and y1 < hy < y2:
                     is_touched = True
                     if grabbing:
                         is_taken = True
+                        # On mémorise quelle personne a pris cet objet
+                        if h_idx in hand_to_person_track_id:
+                            SHELF_STATE[camera_id][track_id]["last_person_tid"] = hand_to_person_track_id[h_idx]
                     
                     # AJOUT VECTEUR VISUEL (Ligne main -> objet)
                     detections_to_draw.append({
@@ -901,18 +1237,17 @@ def process_pick_and_go_logic(camera_id, img):
     
     for track_id in known_ids:
         if track_id not in current_visible_ids:
-            # L'objet est manquant
             SHELF_STATE[camera_id][track_id]["missing_frames"] += 1
-            
 
-            # Si manquant depuis X frames (ex: 15 frames ~ 0.5s - 1s), on valide l'achat
             if SHELF_STATE[camera_id][track_id]["missing_frames"] == 15:
                 product_name = SHELF_STATE[camera_id][track_id].get("real_label", SHELF_STATE[camera_id][track_id]["class"])
-                price = DB_PRODUITS.get(product_name.lower(), 0) # Prix par défaut 0 si inconnu
+                price = DB_PRODUITS.get(product_name.lower(), 0)
 
-                # Identification de la personne sur l'image actuelle
-                # 1. On essaie la reco faciale si dispo
-                user_id = identify_person_in_image(img) if FACE_REC_AVAILABLE else "Client_Unknown"
+                # RETROUVER L'ACHETEUR VIA TRACKING
+                p_tid = SHELF_STATE[camera_id][track_id].get("last_person_tid")
+                user_id = "Client_Unknown"
+                if p_tid and camera_id in PERSON_TRACK_MEMORY and p_tid in PERSON_TRACK_MEMORY[camera_id]:
+                    user_id = PERSON_TRACK_MEMORY[camera_id][p_tid]
                 
                 # 2. Si échec ou pas de reco, on regarde si un humain a assigné cette caméra
                 if user_id == "Client_Unknown" and camera_id in CAMERA_USER_ASSIGNMENTS:
@@ -1027,7 +1362,7 @@ async def get_active_cameras():
             "last_seen": data.get("last_seen", "..."),
             "person": CAMERA_USER_ASSIGNMENTS.get(cam_id, "Inconnu"),
             "person_count": data.get("person_count", 0),
-            "objects_count": data.get("person", "..."), # On avait mis le count dans 'person' avant, je garde pour compatibilité
+            "objects_count": data.get("objects_count", "..."),
             "price": data.get("price", "...")
         })
     return cameras
@@ -1036,49 +1371,50 @@ async def get_active_cameras():
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_dashboard():
-
-    html = """
+    mobile_url = f"https://{LOCAL_IP}:8000/mobile"
+    html = f"""
     <!DOCTYPE html>
     <html lang="fr">
     <head>
         <title>HYFLEX OBS - CONTROL ROOM</title>
         <meta charset="UTF-8">
         <style>
-            body { background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+            body {{ background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }}
             
             /* Header style OBS */
-            .menubar { background: #2b2b2b; padding: 5px 15px; border-bottom: 1px solid #444; display: flex; justify-content: space-between; align-items: center; height: 40px; }
-            .brand { font-weight: bold; color: #00f2ff; letter-spacing: 1px; }
-            .status { font-size: 0.8em; color: #00ff41; }
+            .menubar {{ background: #2b2b2b; padding: 5px 15px; border-bottom: 1px solid #444; display: flex; justify-content: space-between; align-items: center; height: 40px; }}
+            .brand {{ font-weight: bold; color: #00f2ff; letter-spacing: 1px; }}
+            .status {{ font-size: 0.8em; color: #00ff41; }}
 
             /* Layout principal */
-            .main-container { flex: 1; display: flex; padding: 10px; gap: 10px; height: calc(100vh - 50px); }
+            .main-container {{ flex: 1; display: flex; padding: 10px; gap: 10px; height: calc(100vh - 50px); }}
             
             /* Zone principale (Preview) */
-            .preview-area { flex: 3; background: #000; border: 2px solid #00f2ff; position: relative; border-radius: 4px; overflow: hidden; }
-            .single-view { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
-            .preview-img { width: 100%; height: 100%; object-fit: contain; }
-            .preview-label { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 5px 10px; font-weight: bold; color: #fff; }
-            .top-controls { position: absolute; top: 10px; right: 10px; z-index: 100; display: flex; gap: 5px; }
-            .fs-btn { background: rgba(0,0,0,0.6); border: 1px solid #00f2ff; color: #00f2ff; padding: 5px 10px; cursor: pointer; width: auto; font-size: 0.8em; }
-            .fs-btn:hover { background: rgba(0, 242, 255, 0.2); }
+            .preview-area {{ flex: 3; background: #000; border: 2px solid #00f2ff; position: relative; border-radius: 4px; overflow: hidden; }}
+            .single-view {{ width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }}
+            .preview-img {{ width: 100%; height: 100%; object-fit: contain; }}
+            .preview-label {{ position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 5px 10px; font-weight: bold; color: #fff; }}
+            .top-controls {{ position: absolute; top: 10px; right: 10px; z-index: 100; display: flex; gap: 5px; }}
+            .fs-btn {{ background: rgba(0,0,0,0.6); border: 1px solid #00f2ff; color: #00f2ff; padding: 5px 10px; cursor: pointer; width: auto; font-size: 0.8em; }}
+            .fs-btn:hover {{ background: rgba(0, 242, 255, 0.2); }}
             
             /* Styles Grille */
-            .grid-layout { display: grid; grid-template-columns: repeat(auto-fit, minmax(45%, 1fr)); width: 100%; height: 100%; gap: 4px; background: #111; align-content: center; }
-            .grid-cell { position: relative; background: #000; border: 1px solid #333; overflow: hidden; display: flex; align-items: center; justify-content: center; aspect-ratio: 16/9; }
-            .grid-cell img { width: 100%; height: 100%; object-fit: contain; }
-            .grid-label { position: absolute; top: 5px; left: 5px; background: rgba(0,0,0,0.6); color: #00f2ff; padding: 2px 6px; font-size: 0.8em; font-weight: bold; }
+            .grid-layout {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(45%, 1fr)); width: 100%; height: 100%; gap: 4px; background: #111; align-content: center; }}
+            .grid-cell {{ position: relative; background: #000; border: 1px solid #333; overflow: hidden; display: flex; align-items: center; justify-content: center; aspect-ratio: 16/9; }}
+            .grid-cell img {{ width: 100%; height: 100%; object-fit: contain; }}
+            .grid-label {{ position: absolute; top: 5px; left: 5px; background: rgba(0,0,0,0.6); color: #00f2ff; padding: 2px 6px; font-size: 0.8em; font-weight: bold; }}
 
             /* Panneau latéral (Infos & Contrôles) */
-            .side-panel { flex: 1; background: #1f1f1f; display: flex; flex-direction: column; gap: 10px; padding: 10px; border-radius: 4px; overflow-y: auto; }
-            .panel-box { background: #2b2b2b; padding: 10px; border-radius: 4px; border: 1px solid #3d3d3d; }
-            .panel-title { font-size: 0.9em; color: #00ff41; font-weight:bold; text-transform: uppercase; margin-bottom: 5px; border-bottom: 1px solid #444; padding-bottom: 3px; }
+            .side-panel {{ flex: 1; background: #1f1f1f; display: flex; flex-direction: column; gap: 10px; padding: 10px; border-radius: 4px; overflow-y: auto; }}
+            .panel-box {{ background: #2b2b2b; padding: 10px; border-radius: 4px; border: 1px solid #3d3d3d; }}
+            .panel-title {{ font-size: 0.9em; color: #00ff41; font-weight:bold; text-transform: uppercase; margin-bottom: 5px; border-bottom: 1px solid #444; padding-bottom: 3px; }}
             
+            .qr-side {{ background: white; padding: 10px; border-radius: 4px; text-align: center; margin-top: 10px; }}
             /* Liste des scènes (Caméras) en bas */
-            .scenes-container { height: 140px; background: #1a1a1a; display: flex; gap: 15px; padding: 15px; overflow-x: auto; border-top: 1px solid #444; align-items: center; }
-            .scene-card { min-width: 160px; height: 100px; background: #2b2b2b; border: 2px solid #444; position: relative; display: flex; flex-direction: column; }
-            .scene-thumb { flex: 1; background: #000; width: 100%; object-fit: cover; }
-            .scene-name { font-size: 0.8em; padding: 5px; text-align: center; background: #222; }
+            .scenes-container {{ height: 140px; background: #1a1a1a; display: flex; gap: 15px; padding: 15px; overflow-x: auto; border-top: 1px solid #444; align-items: center; }}
+            .scene-card {{ min-width: 160px; height: 100px; background: #2b2b2b; border: 2px solid #444; position: relative; display: flex; flex-direction: column; }}
+            .scene-thumb {{ flex: 1; background: #000; width: 100%; object-fit: cover; }}
+            .scene-name {{ font-size: 0.8em; padding: 5px; text-align: center; background: #222; }}
         </style>
     </head>
     <body>
@@ -1113,14 +1449,25 @@ async def admin_dashboard():
                         Système actif.<br>
                         IA: YOLO + MediaPipe<br>
                         Mode: Surveillance
-                        <div id="global-stats" style="margin-top:10px; color:#00f2ff; font-weight:bold;"></div>
                     </div>
                 </div>
 
                 <div class="panel-box">
-                    <div class="panel-title">Liens Rapides</div>
-                    <a href="/manager" style="color: #ff9900; text-decoration: none; display:block; padding:5px; border:1px solid #ff9900; text-align:center; margin-bottom:5px;">🛠️ Aller au Manager</a>
-                    <a href="/client" style="color: #00f2ff; text-decoration: none; display:block; padding:5px; border:1px solid #00f2ff; text-align:center;">👤 Aller au Client</a>
+                    <div class="panel-title">💾 GESTION DATA</div>
+                    <a href="/api/export_transactions" class="fs-btn" style="text-decoration:none; background:#ff9900; color:black; display:block; text-align:center; margin-bottom:10px; font-weight:bold;">📥 EXPORTER CSV (Daily)</a>
+                    <button onclick="triggerCleaning()" style="width:100%; padding:8px; background:#444; color:#fff; border:none; cursor:pointer;">🧹 CLEAR TRACKING</button>
+                </div>
+
+                <div class="panel-box">
+                    <div class="panel-title">ACCÈS RAPIDES</div>
+                    <a href="/manager" style="color: #ff9900; text-decoration: none; display:block; padding:5px; border-bottom:1px solid #333;">🛠️ MANAGER</a>
+                    <a href="/client" style="color: #00f2ff; text-decoration: none; display:block; padding:5px;">👤 CLIENT WALLET</a>
+                </div>
+
+                <div class="panel-box">
+                    <div class="panel-title">📱 CONNECT MOBILE</div>
+                    <div class="qr-side"><img src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data={mobile_url}" width="120"></div>
+                    <p style="font-size:0.7em; color:#888; text-align:center; margin-top:5px;">Scannez pour ajouter une caméra</p>
                 </div>
             </div>
         </div>
@@ -1132,38 +1479,38 @@ async def admin_dashboard():
         
         <script>
             // Nouvelle fonction pour assigner manuellement sans photo
-            async function assignUserToCamera() {
+            async function assignUserToCamera() {{
                 const name = document.getElementById('reg-name').value;
                 // On récupère la caméra actuellement sélectionnée ou visible
                 // Pour simplifier, on prend la première caméra active ou on demande à l'utilisateur de cliquer sur une cam
                 // Ici, on va supposer que l'utilisateur tape le nom de la caméra dans un prompt s'il n'y a pas de sélection active claire dans le code JS actuel
                 // Ou mieux : on assigne à TOUTES les caméras actives pour le test
                 
-                if(!name) { alert("Entrez un nom !"); return; }
+                if(!name) {{ alert("Entrez un nom !"); return; }}
                 
                 // On envoie une requête pour assigner ce nom à la caméra courante (stockée côté serveur ou client)
                 // Pour faire simple ici, on va créer un endpoint simple
                 const formData = new FormData();
                 formData.append('user_id', name);
                 
-                try {
-                    await fetch('/api/manual_assign', { method: 'POST', body: formData });
+                try {{
+                    await fetch('/api/manual_assign', {{ method: 'POST', body: formData }});
                     document.getElementById('reg-status').innerHTML = "✅ Client " + name + " connecté !";
                     document.getElementById('reg-name').value = "";
-                } catch(e) {
+                }} catch(e) {{
                     alert("Erreur connectivité");
-                }
-            }
+                }}
+            }}
 
-            async function registerFace() {
+            async function registerFace() {{
                 const name = document.getElementById('reg-name').value;
                 const fileInput = document.getElementById('reg-file');
                 const statusDiv = document.getElementById('reg-status');
                 
-                if(!name || fileInput.files.length === 0) {
+                if(!name || fileInput.files.length === 0) {{
                     statusDiv.innerHTML = "⚠️ Nom et photo requis.";
                     return;
-                }
+                }}
                 
                 const formData = new FormData();
                 formData.append('user_id', name);
@@ -1171,46 +1518,46 @@ async def admin_dashboard():
                 
                 statusDiv.innerHTML = "⏳ Envoi...";
                 
-                try {
-                    const res = await fetch('/api/register_face', { method: 'POST', body: formData });
+                try {{
+                    const res = await fetch('/api/register_face', {{ method: 'POST', body: formData }});
                     const data = await res.json();
-                    if(data.status === 'success') {
+                    if(data.status === 'success') {{
                         statusDiv.innerHTML = "✅ Visage appris !";
                         document.getElementById('face-form').reset();
-                    } else {
+                    }} else {{
                         statusDiv.innerHTML = "❌ Erreur: " + (data.error || "Inconnue");
-                    }
-                } catch(e) {
+                    }}
+                }} catch(e) {{
                     statusDiv.innerHTML = "❌ Erreur réseau";
-                }
-            }
+                }}
+            }}
 
-            async function triggerCleaning() {
-                if(confirm("Confirmer le NETTOYAGE du système ? (Reset compteurs & tracking)")) {
-                    try {
-                        await fetch('/api/clean_reset', { method: 'POST' });
+            async function triggerCleaning() {{
+                if(confirm("Confirmer le NETTOYAGE du système ? (Reset compteurs & tracking)")) {{
+                    try {{
+                        await fetch('/api/clean_reset', {{ method: 'POST' }});
                         alert("Système nettoyé !");
-                    } catch(e) {
+                    }} catch(e) {{
                         alert("Erreur nettoyage");
-                    }
-                }
-            }
+                    }}
+                }}
+            }}
 
-            let activeSockets = {}; // Stocke les WebSockets actifs par caméra ID
+            let activeSockets = {{}}; // Stocke les WebSockets actifs par caméra ID
 
-            function toggleFullscreen() {
+            function toggleFullscreen() {{
                 const elem = document.getElementById('preview-container');
-                if (!document.fullscreenElement) {
-                    elem.requestFullscreen().catch(err => {
-                        console.log(`Erreur plein écran: ${err.message}`);
-                    });
-                } else {
+                if (!document.fullscreenElement) {{
+                    elem.requestFullscreen().catch(err => {{
+                        console.log(`Erreur plein écran: ${{err.message}}`);
+                    }});
+                }} else {{
                     document.exitFullscreen();
-                }
-            }
+                }}
+            }}
 
             // Met à jour la grille de caméras
-            async function updateGrid() {                
+            async function updateGrid() {{                
                 const gridContainer = document.getElementById('grid-view');
                 const res = await fetch('/api/cameras');
                 const cameras = await res.json();
@@ -1218,48 +1565,48 @@ async def admin_dashboard():
                 let totalPeople = 0;
 
                 // Si aucune caméra
-                if (cameras.length === 0) {
-                    if (!gridContainer.innerHTML.includes('EN ATTENTE')) {
+                if (cameras.length === 0) {{
+                    if (!gridContainer.innerHTML.includes('EN ATTENTE')) {{
                          gridContainer.innerHTML = '<div style="color:#666; display:flex; align-items:center; justify-content:center; grid-column:1/-1; width:100%; height:100%;">EN ATTENTE DE FLUX...</div>';
-                    }
+                    }}
                     return;
-                } else {
+                }} else {{
                     // Supprimer le message d'attente s'il existe
                     const waitMsg = gridContainer.querySelector('div[style*="color:#666"]');
                     if (waitMsg) waitMsg.remove();
-                }
+                }}
 
                 const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
 
                 // 1. AJOUT DES NOUVELLES CAMÉRAS
-                cameras.forEach(cam => {
+                cameras.forEach(cam => {{
                     totalPeople += cam.person_count || 0;
 
-                    if(!document.getElementById('grid-cell-' + cam.id)) {
+                    if(!document.getElementById('grid-cell-' + cam.id)) {{
                         const cell = document.createElement('div');
                         cell.className = 'grid-cell';
                         cell.id = 'grid-cell-' + cam.id;
-                        cell.innerHTML = `<div class="grid-label">${cam.id} | Pers: <span id="count-${cam.id}">${cam.person_count}</span></div><img id="grid-img-${cam.id}">`;
+                        cell.innerHTML = `<div class="grid-label">${{cam.id}} | Pers: <span id="count-${{cam.id}}">${{cam.person_count}}</span></div><img id="grid-img-${{cam.id}}">`;
                         gridContainer.appendChild(cell);
 
                         // Connexion WebSocket pour cette caméra
                         const ws = new WebSocket(protocol + window.location.host + "/ws_view/" + cam.id);
                         ws.binaryType = "blob";
-                        ws.onmessage = (e) => {
+                        ws.onmessage = (e) => {{
                             const img = document.getElementById('grid-img-' + cam.id);
-                            if(img) {
+                            if(img) {{
                                 if (img.dataset.lastUrl) URL.revokeObjectURL(img.dataset.lastUrl);
                                 const url = URL.createObjectURL(e.data);
                                 img.src = url;
                                 img.dataset.lastUrl = url;
-                            }
-                        };
+                            }}
+                        }};
                         activeSockets[cam.id] = ws;
-                    } else {
+                    }} else {{
                         // Mise à jour du compteur sur la cellule existante
                         document.getElementById('count-' + cam.id).innerText = cam.person_count;
-                    }
-                });
+                    }}
+                }});
 
                 // Mise à jour du GROS COMPTEUR
                 document.getElementById('big-counter').innerText = totalPeople;
@@ -1268,71 +1615,71 @@ async def admin_dashboard():
                 const activeIds = cameras.map(c => c.id);
                 const cells = document.querySelectorAll('.grid-cell');
                 
-                cells.forEach(cell => {
+                cells.forEach(cell => {{
                     const id = cell.id.replace('grid-cell-', '');
-                    if (!activeIds.includes(id)) {
+                    if (!activeIds.includes(id)) {{
                         // Fermeture du WebSocket
-                        if (activeSockets[id]) {
+                        if (activeSockets[id]) {{
                             activeSockets[id].close();
                             delete activeSockets[id];
-                        }
+                        }}
                         // Suppression de l'élément HTML
                         cell.remove();
-                    }
-                });
-            }
+                    }}
+                }});
+            }}
 
-            async function refreshLoop() {
+            async function refreshLoop() {{
                 // Rafraichir les vignettes du bas
                 const thumbs = document.querySelectorAll('.scene-thumb');
-                thumbs.forEach(img => {
+                thumbs.forEach(img => {{
                     img.src = img.src.split('?')[0] + '?t=' + new Date().getTime();
-                });
+                }});
 
                 // Mise à jour de la liste des caméras ET de la grille principale
                 await updateCameraList();
                 await updateGrid();
                 
                 setTimeout(refreshLoop, 1000); // Boucle plus lente car la vidéo principale est gérée par WebSocket
-            }
+            }}
 
-            async function updateCameraList() {
-                try {
+            async function updateCameraList() {{
+                try {{
                     const res = await fetch('/api/cameras');
                     const cameras = await res.json();
                     const container = document.getElementById('scenes-list');
                     
-                    if(cameras.length === 0) {
-                        if(!container.innerHTML.includes('EN ATTENTE')) {
+                    if(cameras.length === 0) {{
+                        if(!container.innerHTML.includes('EN ATTENTE')) {{
                              container.innerHTML = "<div style='color:#666; padding: 20px;'>EN ATTENTE DE CONNEXION MOBILE...</div>";
-                        }
+                        }}
                         return;
-                    }
+                    }}
 
                     // Nettoyage du message d'attente
                     if(container.querySelector('div[style*="color:#666"]')) container.innerHTML = '';
 
                     // 1. AJOUT DES NOUVELLES CAMÉRAS
-                    cameras.forEach(cam => {
-                        if(!document.getElementById('card-' + cam.id)) {
+                    cameras.forEach(cam => {{
+                        if(!document.getElementById('card-' + cam.id)) {{
                             const div = document.createElement('div');
                             div.className = 'scene-card';
                             div.id = 'card-' + cam.id;
-                            div.innerHTML = `<img src="/video_feed/${cam.id}" class="scene-thumb"><div class="scene-name">📷 ${cam.id}</div>`;
+                            div.innerHTML = `<img src="/video_feed/${{cam.id}}" class="scene-thumb"><div class="scene-name">📷 ${{cam.id}}</div>`;
                             container.appendChild(div);
-                        }
-                    });
+                        }}
+                    }});
 
                     // 2. SUPPRESSION DES ANCIENNES
                     const activeIds = cameras.map(c => 'card-' + c.id);
-                    document.querySelectorAll('.scene-card').forEach(card => {
+                    document.querySelectorAll('.scene-card').forEach(card => {{
                         if(!activeIds.includes(card.id)) card.remove();
-                    });
+                    }});
 
-                } catch(e) {
+                }} catch(e) {{
                     console.error("Erreur API:", e);
-                }
-            }
+                }}
+            }}
             
             refreshLoop();
         </script>
@@ -1677,15 +2024,14 @@ async def websocket_endpoint(websocket: WebSocket, camera_id: str):
             detected_info = f"{len(detections)} objets"
 
             # Mise à jour de la mémoire partagée pour le dashboard Admin
-            CAMERA_FEEDS[camera_id] = {
+            CAMERA_FEEDS.setdefault(camera_id, {}).update({
                 # On ne stocke plus l'image traitée ici pour gagner du temps
                 # L'admin la génèrera lui-même
-                "last_seen": "Video WebSocket",
-                "person": "-",
-                "person": detected_info, # Affiche les objets détectés
+                "last_seen": datetime.datetime.now().strftime("%H:%M:%S"),
+                "objects_count": detected_info, # Affiche les objets détectés
                 "price": "-",
                 "last_analysis_ts": 0
-            }
+            })
             
             # Pas de réponse envoyée au client pour maximiser la bande passante montante
             
@@ -1730,14 +2076,13 @@ async def detect_merchandise(camera_id: str, file: UploadFile = File(...)):
         processed_image = draw_overlays(contents, info_overlay)
         
         # Mise à jour directe de la mémoire vidéo
-        CAMERA_FEEDS[camera_id] = {
+        CAMERA_FEEDS.setdefault(camera_id, {}).update({
             "image_bytes": processed_image,
             "last_seen": "Video Direct",
-            "person": "-",
-            "person": info,
+            "objects_count": info,
             "price": "-",
             "last_analysis_ts": 0
-        }
+        })
         
         return {"status": "ok"}
 
@@ -1852,8 +2197,8 @@ async def mobile_interface():
                 if (!isStreaming || !ws || ws.readyState !== WebSocket.OPEN) return;
                 if (!video.videoWidth) return;
                 
-                // OPTIMISATION: Réduction de la résolution (480p max)
-                const maxH = 480;
+                // AMÉLIORATION DISTANCE: On augmente la résolution envoyée (720p)
+                const maxH = 720; 
                 let w = video.videoWidth;
                 let h = video.videoHeight;
                 if (h > maxH) {
@@ -1874,6 +2219,11 @@ async def mobile_interface():
                     requestAnimationFrame(capture);
                 }, 'image/jpeg', 0.3); 
             }
+
+            // Tentative de démarrage automatique au chargement
+            window.addEventListener('load', () => {
+                setTimeout(toggleLive, 500); 
+            });
         </script>
     </body>
     </html>
@@ -1883,7 +2233,6 @@ async def mobile_interface():
 
 if __name__ == "__main__":
     import uvicorn
-    import socket
     import sys
 
     # Vérification de la dépendance critique pour les WebSockets
@@ -1894,24 +2243,45 @@ if __name__ == "__main__":
         print("👉 Veuillez l'installer avec la commande : pip install websockets\n")
         sys.exit(1)
 
-    # Récupérer l'IP locale pour l'afficher
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(('10.255.255.255', 1))
-        IP = s.getsockname()[0]
-    except:
-        IP = '127.0.0.1'
-    finally:
-        s.close()
-
+    IP = LOCAL_IP
     print(f"\n" + "="*60)
     print(f"🚀 LE SERVEUR EST EN LIGNE (SSL ACTIF)")
     print(f"="*60)
     print(f"👉 Lien à utiliser : https://{IP}:8000")
+
+    if qrcode:
+        print(f"\n📱 SCANNEZ CE CODE POUR CONNECTER VOTRE MOBILE :")
+        qr = qrcode.QRCode(version=1, border=2)
+        qr.add_data(f"https://{IP}:8000/mobile")
+        qr.print_ascii(invert=True)
+    else:
+        print(f"\n📱 LIEN MOBILE : https://{IP}:8000/mobile (Installez 'qrcode' pour voir le flashcode ici)")
+
     print(f"\n⚠️  ALERTE SÉCURITÉ NAVIGATEUR (IMPORTANT) :")
     print(f"   1. Vous verrez un écran rouge 'Votre connexion n'est pas privée'.")
     print(f"   2. Cliquez sur 'Paramètres avancés' (Advanced).")
     print(f"   3. Cliquez sur 'Continuer vers {IP} (dangereux)'.")
     print(f"="*60 + "\n")
+@app.post("/api/rfid_login")
+async def rfid_login(rfid_id: str = Form(...)):
+    """Vérifie l'UID RFID auprès d'Apps Script et autorise l'accès pour l'ESP32."""
+    payload = {"action": "login", "payload": {"rfidUid": rfid_id}}
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=5)
+        data = resp.json()
+        
+        if data.get("success") and data.get("authorized"):
+            user_name = data["user_data"]["name"]
+            # On ouvre une session active pour cette personne
+            CAMERA_USER_ASSIGNMENTS["CAM_1"] = user_name
+            return {"status": "success", "authorized": True, "user": user_name}
+        
+        return {"status": "error", "authorized": False, "message": "Badge inconnu ou désactivé"}
+    except Exception as e:
+        print(f"Erreur RFID Login: {e}")
+        return {"status": "error", "authorized": False, "message": "Erreur serveur"}
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=5) # Ajout d'un timeout
+        resp.raise_for_status() # Lève une exception pour les codes 4xx/5
 
     uvicorn.run(app, host="0.0.0.0", port=8000, ssl_keyfile="key.pem", ssl_certfile="cert.pem")

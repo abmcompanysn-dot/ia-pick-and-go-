@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JEL DEM - Super App</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background: #ffffff; color: #1a1a1a; }
+        .glass { background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(10px); border: 1px solid rgba(0, 0, 0, 0.05); box-shadow: 0 8px 32px rgba(0,0,0,0.05); }
+        .bg-dall-green { background-color: #22c55e; }
+        .border-dall-green { border-color: #22c55e; }
+        .text-dall-orange { color: #f97316; }
+        .btn-orange { background-color: #f97316; color: white; transition: all 0.2s; }
+        .btn-orange:hover { background-color: #ea580c; transform: translateY(-1px); }
+        .card-balance { background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%); color: white; }
+    </style>
+</head>
+<body class="p-4 max-w-md mx-auto bg-gray-50 min-h-screen">
+    <header class="flex justify-between items-center mb-8 pt-4">
+        <h1 class="text-2xl font-extrabold tracking-tighter text-gray-900">JEL <span class="text-dall-orange">DEM</span></h1>
+        <div class="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center text-green-600 font-bold">JM</div>
+    </header>
+
+    <!-- Section Login/Inscription -->
+    <div id="auth-section" class="glass rounded-3xl p-6 mb-6 border-t-4 border-orange-500 shadow-xl">
+        <div class="flex gap-4 mb-6 border-b border-gray-100 pb-2">
+            <button onclick="toggleAuthMode('login')" id="tab-login-btn" class="font-bold text-sm text-orange-500 border-b-2 border-orange-500 pb-2">CONNEXION</button>
+            <button onclick="toggleAuthMode('register')" id="tab-reg-btn" class="font-bold text-sm text-gray-400 pb-2">INSCRIPTION</button>
+        </div>
+
+        <!-- Formulaire Connexion -->
+        <div id="form-login" class="space-y-4">
+            <div class="text-left">
+                <label class="text-[10px] font-bold text-gray-400 uppercase ml-1">Téléphone</label>
+                <input type="tel" id="user-phone" placeholder="77 000 00 00" class="w-full bg-gray-100 border-none p-4 rounded-2xl text-lg focus:ring-2 focus:ring-orange-500 outline-none">
+            </div>
+            <div class="text-left">
+                <label class="text-[10px] font-bold text-gray-400 uppercase ml-1">Code PIN / Passe</label>
+                <input type="password" id="user-password-login" placeholder="••••" class="w-full bg-gray-100 border-none p-4 rounded-2xl text-lg focus:ring-2 focus:ring-orange-500 outline-none">
+            </div>
+            <button onclick="login()" class="w-full btn-orange font-bold p-4 rounded-2xl shadow-lg mt-4 uppercase tracking-widest text-sm">Se Connecter</button>
+        </div>
+
+        <!-- Formulaire Inscription -->
+        <div id="form-register" class="hidden space-y-3">
+            <input type="text" id="reg-name" placeholder="Nom complet" class="w-full bg-gray-100 border-none p-4 rounded-2xl outline-none focus:ring-2 focus:ring-green-500">
+            <input type="tel" id="reg-phone" placeholder="Numéro de téléphone" class="w-full bg-gray-100 border-none p-4 rounded-2xl outline-none focus:ring-2 focus:ring-green-500">
+            <input type="email" id="reg-email" placeholder="Email (Reçus)" class="w-full bg-gray-100 border-none p-4 rounded-2xl outline-none focus:ring-2 focus:ring-green-500">
+            <input type="password" id="reg-password" placeholder="Créer un Code PIN" class="w-full bg-gray-100 border-none p-4 rounded-2xl outline-none focus:ring-2 focus:ring-green-500">
+            <button onclick="register()" class="w-full bg-green-500 text-white font-bold p-4 rounded-2xl shadow-lg mt-2 uppercase tracking-widest text-sm">Créer mon compte</button>
+        </div>
+    </div>
+
+    <!-- Section Dashboard (Cachée par défaut) -->
+    <div id="dashboard" class="hidden">
+        <!-- ONGLET 1: IDENTIFICATION (QR & RFID) -->
+        <div id="tab-id" class="tab-content">
+            <div class="glass rounded-3xl p-6 mb-6 text-center border-b-4 border-dall-green">
+                <div id="entry-status" class="inline-block px-3 py-1 rounded-full bg-gray-100 text-[10px] font-bold text-gray-400 mb-4 uppercase tracking-widest">
+                    En attente d'entrée
+                </div>
+                <div class="bg-white p-4 rounded-2xl inline-block mb-4 shadow-inner border border-gray-100">
+                    <div id="qr-code-display" class="w-40 h-40 flex items-center justify-center"></div>
+                </div>
+                <div class="flex items-center justify-center gap-2 mb-2">
+                    <i class="fas fa-microchip text-xl text-green-600"></i>
+                    <p class="font-bold text-sm tracking-tight" id="rfid-id">RFID: --- --- ---</p>
+                </div>
+                <p class="text-[10px] text-gray-400">Scannez pour entrer</p>
+            </div>
+        </div>
+
+        <!-- ONGLET 2: FACTURES (HISTORIQUE) -->
+        <div id="tab-factures" class="tab-content hidden">
+            <h3 class="font-bold mb-4 px-2 text-gray-700 uppercase text-xs tracking-widest">Mes Factures Récentes</h3>
+            <div id="transactions-list" class="space-y-3 mb-8"></div>
+        </div>
+
+        <!-- ONGLET 3: PAIEMENT (SOLDE & RECHARGE) -->
+        <div id="tab-paiement" class="tab-content hidden">
+            <div class="card-balance rounded-3xl p-8 mb-6 shadow-xl relative overflow-hidden">
+                <div class="relative z-10">
+                    <p class="text-white/80 font-bold text-xs uppercase tracking-widest mb-1">Solde JEL DEM</p>
+                    <h3 class="text-4xl font-black" id="display-balance">0 FCFA</h3>
+                </div>
+            </div>
+            <div class="glass p-6 rounded-3xl mb-8">
+                <h4 class="font-bold mb-4 text-sm text-gray-600 uppercase">Recharge Rapide</h4>
+                <div class="grid grid-cols-3 gap-2">
+                    <button onclick="recharge(2000)" class="bg-gray-100 p-3 rounded-xl font-bold text-sm">2000</button>
+                    <button onclick="recharge(5000)" class="bg-orange-500 text-white p-3 rounded-xl font-bold text-sm">5000</button>
+                    <button onclick="recharge(10000)" class="bg-gray-100 p-3 rounded-xl font-bold text-sm">10000</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ONGLET 4: RÉGLAGES (SÉCURITÉ) -->
+        <div id="tab-settings" class="tab-content hidden space-y-4">
+            <!-- Informations Personnelles -->
+            <div class="glass p-6 rounded-3xl text-left">
+                <h3 class="font-bold mb-4 text-gray-800 flex items-center gap-2">
+                    <i class="fas fa-user-circle text-green-600"></i>
+                    Infos Personnelles
+                </h3>
+                <div class="space-y-3">
+                    <div><p class="text-[10px] text-gray-400 uppercase font-bold">Nom Complet</p><p id="prof-name" class="font-bold text-sm">--</p></div>
+                    <div><p class="text-[10px] text-gray-400 uppercase font-bold">Téléphone</p><p id="prof-phone" class="font-bold text-sm">--</p></div>
+                    <div><p class="text-[10px] text-gray-400 uppercase font-bold">ID RFID Unique</p><p id="prof-rfid" class="font-mono text-xs text-orange-600">--</p></div>
+                </div>
+                <button onclick="requestRfid()" class="mt-4 w-full bg-green-100 text-green-700 text-[10px] font-bold p-2 rounded-xl uppercase tracking-tighter">
+                    <i class="fas fa-plus-circle mr-1"></i> Lier une nouvelle carte RFID
+                </button>
+            </div>
+
+            <!-- Statistiques d'Achat -->
+            <div class="grid grid-cols-2 gap-4">
+                <div class="bg-white p-4 rounded-3xl shadow-sm border border-gray-100">
+                    <p class="text-[9px] text-gray-400 uppercase font-bold">Total Dépensé</p>
+                    <p id="stat-total" class="text-xl font-black text-green-600">0 F</p>
+                </div>
+                <div class="bg-white p-4 rounded-3xl shadow-sm border border-gray-100">
+                    <p class="text-[9px] text-gray-400 uppercase font-bold">Articles</p>
+                    <p id="stat-count" class="text-xl font-black text-orange-500">0</p>
+                </div>
+            </div>
+
+            <!-- Changement de mot de passe -->
+            <!-- Centre de Sécurité & Face ID -->
+            <div class="glass p-6 rounded-3xl text-left space-y-4">
+                <h3 class="font-bold text-gray-800 flex items-center gap-2">
+                    <i class="fas fa-shield-halved text-orange-500"></i>
+                    Sécurité & Biométrie
+                </h3>
+                
+                <div id="face-id-status" class="bg-gray-50 p-4 rounded-2xl border border-gray-100 flex items-center justify-between">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-full bg-white flex items-center justify-center text-orange-500 shadow-sm">
+                            <i class="fas fa-face-smile"></i>
+                        </div>
+                        <div>
+                            <p class="text-[10px] font-bold text-gray-400 uppercase">Face ID</p>
+                            <p class="text-xs font-bold" id="face-status-text">Non configuré</p>
+                        </div>
+                    </div>
+                    <button onclick="setupFaceID()" class="text-[10px] font-black text-orange-600 bg-orange-100 px-3 py-2 rounded-lg uppercase">Configurer</button>
+                </div>
+
+                <div class="space-y-2">
+                    <label class="text-[10px] font-bold text-gray-400 uppercase ml-1">Changer le Code PIN</label>
+                    <input type="password" id="new-password" placeholder="Nouveau code PIN" class="w-full bg-gray-100 p-4 rounded-2xl outline-none focus:ring-2 focus:ring-orange-500 transition-all">
+                    <button onclick="updatePassword()" class="w-full bg-gray-800 text-white font-bold p-4 rounded-2xl shadow-lg">METTRE À JOUR</button>
+                </div>
+            </div>
+            
+            <button onclick="location.reload()" class="w-full text-red-500 font-bold text-xs uppercase tracking-widest pt-4">Se déconnecter</button>
+        </div>
+    </div>
+
+    <!-- Modal Face ID (Caché par défaut) -->
+    <div id="face-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+        <div class="glass w-full max-w-sm rounded-3xl p-6 text-center space-y-4">
+            <h3 class="text-xl font-bold text-gray-800">Configuration Face ID</h3>
+            <div class="relative aspect-square rounded-2xl overflow-hidden bg-black border-2 border-orange-500">
+                <video id="face-video" autoplay playsinline class="w-full h-full object-cover"></video>
+                <canvas id="face-canvas" class="hidden"></canvas>
+            </div>
+            <p class="text-xs text-gray-500">Placez votre visage au centre du cadre</p>
+            <div class="flex gap-3">
+                <button onclick="closeFaceModal()" class="flex-1 bg-gray-200 text-gray-700 font-bold p-3 rounded-xl uppercase text-xs">Annuler</button>
+                <button onclick="captureFace()" class="flex-1 btn-orange font-bold p-3 rounded-xl uppercase text-xs">Capturer</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Barre de Navigation Fixe -->
+    <nav id="bottom-nav" class="hidden fixed bottom-6 left-4 right-4 glass rounded-full p-2 flex justify-around items-center shadow-2xl border-t border-white/20">
+        <button onclick="switchTab('tab-id')" class="nav-btn p-3 rounded-full text-green-600 bg-green-50"><i class="fas fa-id-card text-xl"></i></button>
+        <button onclick="switchTab('tab-factures')" class="nav-btn p-3 rounded-full text-gray-400"><i class="fas fa-history text-xl"></i></button>
+        <button onclick="switchTab('tab-paiement')" class="nav-btn p-3 rounded-full text-gray-400"><i class="fas fa-wallet text-xl"></i></button>
+        <button onclick="switchTab('tab-settings')" class="nav-btn p-3 rounded-full text-gray-400"><i class="fas fa-user-cog text-xl"></i></button>
+    </nav>
+
+    <script>
+// REMPLACEZ PAR VOTRE URL DE DÉPLOIEMENT GOOGLE APPS SCRIPT
+const API_URL = "https://script.google.com/macros/s/AKfycbxGjUmpz3yBSJpfZ9fvZsg8zIxsqSS8jRWEIA04uX3_5dWdmyAnqExj18RqtMPhyRupxA/exec";
+let currentUser;
+let faceStream = null;
+// Au chargement de la page, on vérifie si un utilisateur est déjà connecté
+window.addEventListener('DOMContentLoaded', () => {
+    // Injection de la fonction renderBalanceOnly si elle manque
+    window.renderBalanceOnly = function() {
+        const el = document.getElementById('display-balance');
+        if (el && currentUser) {
+            el.innerText = `${currentUser.balance.toLocaleString()} FCFA`;
+        }
+    };
+
+    const savedUser = localStorage.getItem('jeldem_session');
+    if (savedUser) {
+        currentUser = JSON.parse(savedUser);
+        showDashboard();
+    }
+});
+
+function toggleAuthMode(mode) {
+    const isLogin = mode === 'login';
+    document.getElementById('form-login').classList.toggle('hidden', !isLogin);
+    document.getElementById('form-register').classList.toggle('hidden', isLogin);
+    
+    document.getElementById('tab-login-btn').className = isLogin ? 'font-bold text-sm text-orange-500 border-b-2 border-orange-500 pb-2' : 'font-bold text-sm text-gray-400 pb-2';
+    document.getElementById('tab-reg-btn').className = !isLogin ? 'font-bold text-sm text-green-500 border-b-2 border-green-500 pb-2' : 'font-bold text-sm text-gray-400 pb-2';
+    document.getElementById('auth-section').style.borderColor = isLogin ? '#f97316' : '#22c55e';
+}
+
+function switchTab(tabId) {
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
+    document.getElementById(tabId).classList.remove('hidden');
+    
+    document.querySelectorAll('.nav-btn').forEach(btn => {
+        btn.classList.remove('bg-green-50', 'text-green-600');
+        btn.classList.add('text-gray-400');
+    });
+    event.currentTarget.classList.add('bg-green-50', 'text-green-600');
+    event.currentTarget.classList.remove('text-gray-400');
+}
+
+function renderBalanceOnly() {
+    const el = document.getElementById('display-balance');
+    if (el && currentUser) {
+        el.innerText = `${currentUser.balance.toLocaleString()} FCFA`;
+    }
+}
+
+async function login() {
+    const phone = document.getElementById('user-phone').value;
+    const pass = document.getElementById('user-password-login').value;
+    if(!phone || !pass) return alert("Veuillez remplir tous les champs");
+
+    try {
+        const payload = {
+            action: "login",
+            payload: { phone: phone, password: pass }
+        };
+
+        // Note: Google Apps Script nécessite souvent redirect: 'follow'
+        const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+        const data = await res.json();
+        
+        if(res.ok) {
+            currentUser = data.user_data;
+            // Sauvegarder la session
+            localStorage.setItem('jeldem_session', JSON.stringify(currentUser));
+            showDashboard();
+        } else {
+            alert(data.detail || "Identifiants incorrects");
+        }
+    } catch(e) {
+        alert("Erreur de connexion serveur.");
+    }
+}
+
+function logout() {
+    if(confirm("Voulez-vous vous déconnecter ?")) {
+        localStorage.removeItem('jeldem_session');
+        location.reload();
+    }
+}
+
+async function register() {
+    const name = document.getElementById('reg-name').value;
+    const phone = document.getElementById('reg-phone').value;
+    const email = document.getElementById('reg-email').value;
+    const pass = document.getElementById('reg-password').value;
+
+    if(!name || !phone || !pass) return alert("Nom, Téléphone et Code PIN requis !");
+
+    try {
+        const payload = {
+            action: "registerUser",
+            payload: {
+                name: name,
+                phone: phone,
+                email: email,
+                password: pass
+            }
+        };
+        const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+        if(res.ok) {
+            alert("Bienvenue chez JEL DEM ! Connectez-vous maintenant.");
+            toggleAuthMode('login');
+            document.getElementById('user-phone').value = phone;
+        } else {
+            alert("Erreur lors de l'inscription.");
+        }
+    } catch(e) { alert("Erreur de connexion serveur."); }
+}
+
+async function updatePassword() {
+    const newPass = document.getElementById('new-password').value;
+    if(!newPass) return;
+    
+    const payload = {
+        action: "updatePassword",
+        payload: { phone: currentUser.phone, newPassword: newPass }
+    };
+    
+    const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+    if(res.ok) {
+        alert("Mot de passe JEL DEM mis à jour !");
+        document.getElementById('new-password').value = "";
+        // Mettre à jour le mot de passe dans le stockage local n'est pas nécessaire car on stocke les infos de profil
+    }
+}
+
+async function recharge(amount) {
+    const payload = {
+        action: "rechargeBalance",
+        payload: { phone: currentUser.phone, amount: amount }
+    };
+    
+    const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+    const data = await res.json();
+
+    if(res.ok) {
+        alert(`+${amount} FCFA crédités sur JEL DEM`);
+        currentUser.balance = data.newBalance;
+        localStorage.setItem('jeldem_session', JSON.stringify(currentUser));
+        renderBalanceOnly();
+    }
+}
+
+function showDashboard() {
+    document.getElementById('auth-section').classList.add('hidden');
+    document.getElementById('dashboard').classList.remove('hidden');
+    document.getElementById('bottom-nav').classList.remove('hidden');
+    
+    renderBalanceOnly();
+
+    // Remplissage du Profil
+    document.getElementById('prof-name').innerText = currentUser.name;
+    document.getElementById('prof-phone').innerText = currentUser.phone;
+    const rfidCode = `JD-${currentUser.phone.substring(0,3)}-${currentUser.phone.substring(currentUser.phone.length - 3)}`;
+    document.getElementById('prof-rfid').innerText = rfidCode;
+    
+    // Mise à jour visuelle du statut Face ID
+    const isFaceActive = currentUser.face_id === "OUI";
+    const faceStatusText = document.getElementById('face-status-text');
+    const faceIconBox = document.getElementById('face-icon-box');
+    const faceBtn = document.getElementById('face-setup-btn');
+
+    faceStatusText.innerText = isFaceActive ? "ACTIVÉ & SÉCURISÉ" : "NON CONFIGURÉ";
+    faceStatusText.className = isFaceActive ? "text-xs font-black text-green-600" : "text-xs font-black text-gray-500";
+    faceIconBox.className = isFaceActive ? "w-10 h-10 rounded-full bg-green-100 flex items-center justify-center shadow-sm text-green-600" : "w-10 h-10 rounded-full bg-white flex items-center justify-center shadow-sm text-gray-400";
+    if(isFaceActive) faceBtn.innerHTML = '<i class="fas fa-check mr-1"></i> Prêt';
+
+    // Calcul des statistiques
+    const totalSpent = currentUser.transactions.reduce((acc, t) => acc + t.montant, 0);
+    const totalItems = currentUser.transactions.length;
+    document.getElementById('stat-total').innerText = `${totalSpent.toLocaleString()} F`;
+    document.getElementById('stat-count').innerText = totalItems;
+
+    // Génération du QR Code via API externe
+    const qrArea = document.getElementById('qr-code-display');
+    // URL de profil pour que le scan montre les infos de la personne
+    const profileUrl = window.location.href.split('?')[0] + "?view_profile=" + currentUser.phone;
+    const qrData = encodeURIComponent(profileUrl);
+    
+    qrArea.innerHTML = `<img src="https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${qrData}" class="w-full h-full">`;
+    
+    // Simulation d'un ID RFID
+    document.getElementById('rfid-id').innerText = `RFID: ${rfidCode}`;
+
+    const list = document.getElementById('transactions-list');
+    list.innerHTML = currentUser.transactions.map(t => `
+        <div class="bg-white p-4 rounded-2xl flex justify-between items-center shadow-sm border border-gray-100">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-green-50 rounded-xl flex items-center justify-center text-green-600"><i class="fas fa-shopping-basket"></i></div>
+                <div>
+                    <p class="font-bold text-sm text-gray-800">${t.produit.toUpperCase()}</p>
+                    <p class="text-[10px] text-gray-400 font-medium">${t.timestamp}</p>
+                </div>
+            </div>
+            <p class="text-red-500 font-black text-sm">-${t.montant} F</p>
+        </div>
+    `).join('');
+}
+
+async function requestRfid() {
+    const rfidUid = prompt("Veuillez scanner ou saisir l'ID de votre carte RFID :");
+    if (!rfidUid) return;
+    
+    const payload = { action: "assignRfid", payload: { phone: currentUser.phone, rfidUid: rfidUid } };
+    await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+    alert("Carte RFID liée avec succès !");
+    location.reload();
+}
+
+async function setupFaceID() {
+    document.getElementById('face-modal').classList.remove('hidden');
+    try {
+        faceStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+        document.getElementById('face-video').srcObject = faceStream;
+    } catch (e) {
+        alert("Erreur caméra : " + e);
+        closeFaceModal();
+    }
+}
+
+function closeFaceModal() {
+    if (faceStream) {
+        faceStream.getTracks().forEach(track => track.stop());
+    }
+    document.getElementById('face-modal').classList.add('hidden');
+}
+
+async function captureFace() {
+    const video = document.getElementById('face-video');
+    const canvas = document.getElementById('face-canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+
+    // Extraction de l'image en Base64
+    const imageData = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+
+    const payload = {
+        action: "uploadImage",
+        payload: {
+            filename: `FACE_${currentUser.phone}.jpg`,
+            image: imageData,
+            phone: currentUser.phone
+        }
+    };
+
+    try {
+        document.getElementById('face-status-text').innerText = "SYNCHRONISATION...";
+        const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+        const data = await res.json();
+        if (data.success) {
+            alert("Félicitations ! Votre Face ID est maintenant actif sur JEL DEM.");
+            currentUser.face_id = "OUI";
+            localStorage.setItem('jeldem_session', JSON.stringify(currentUser));
+            showDashboard();
+            closeFaceModal();
+        } else {
+            alert("Erreur lors de l'envoi : " + data.error);
+        }
+    } catch (e) {
+        alert("Erreur de connexion : " + e);
+    }
+}
+    </script>
+</body>
+</html>

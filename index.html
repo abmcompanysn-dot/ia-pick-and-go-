@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DALL JAMM - Hub Intelligente</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="config.js"></script>
+    <style>
+        body { 
+            background-image: linear-gradient(rgba(10, 10, 12, 0.9), rgba(10, 10, 12, 0.9)), url('https://i.postimg.cc/Cx0pYgC2/photo-de-espcae-tudiant-africain.jpg');
+            background-size: cover; background-attachment: fixed; color: #fff; 
+        }
+        .glass { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+        .neon-border { border: 1px solid #00f2ff; box-shadow: 0 0 15px rgba(0, 242, 255, 0.2); }
+        .card-hover:hover { transform: translateY(-5px); transition: 0.3s; border-color: #00f2ff; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col items-center justify-center p-6">
+    
+    <div class="max-w-4xl w-full text-center mb-12">
+        <h1 class="text-5xl font-black tracking-tighter mb-2">DALL <span class="text-cyan-400">JAMM</span></h1>
+        <p class="text-gray-400">Vision Artificielle & Commerce Autonome</p>
+        
+        <div class="mt-8 flex justify-center items-center gap-4">
+            <input id="serverIp" type="text" placeholder="IP du Serveur (ex: 192.168.1.11)" 
+                   class="bg-gray-900 border border-gray-700 px-4 py-2 rounded-lg text-sm w-64 focus:outline-none focus:border-cyan-500">
+            <button onclick="saveIp()" class="bg-cyan-600 hover:bg-cyan-500 px-4 py-2 rounded-lg text-sm font-bold transition">CONNECTER</button>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full max-w-6xl">
+        
+        <!-- Admin Card -->
+        <a href="#" onclick="openModule('/admin')" class="glass p-8 rounded-2xl card-hover text-left">
+            <div class="text-cyan-400 text-3xl mb-4"><i class="fas fa-shield-halved"></i></div>
+            <h3 class="text-xl font-bold mb-2">Control Room</h3>
+            <p class="text-sm text-gray-500">Accès Admin, surveillance multi-caméras et export de données CSV.</p>
+        </a>
+
+        <!-- Mobile Cam -->
+        <a href="#" onclick="openModule('/mobile')" class="glass p-8 rounded-2xl card-hover text-left border-cyan-900">
+            <div class="text-cyan-400 text-3xl mb-4"><i class="fas fa-mobile-screen-button"></i></div>
+            <h3 class="text-xl font-bold mb-2">Mobile Camera</h3>
+            <p class="text-sm text-gray-500">Transformer ce smartphone en capteur IA pour le magasin.</p>
+        </a>
+
+        <!-- Wallet -->
+        <a href="#" onclick="openModule('/client')" class="glass p-8 rounded-2xl card-hover text-left">
+            <div class="text-cyan-400 text-3xl mb-4"><i class="fas fa-wallet"></i></div>
+            <h3 class="text-xl font-bold mb-2">Client Wallet</h3>
+            <p class="text-sm text-gray-500">Consulter le solde, l'historique des achats et le profil.</p>
+        </a>
+
+        <!-- Manager -->
+        <a href="#" onclick="openModule('/manager')" class="glass p-8 rounded-2xl card-hover text-left">
+            <div class="text-orange-500 text-3xl mb-4"><i class="fas fa-boxes-stacked"></i></div>
+            <h3 class="text-xl font-bold mb-2">Inventory Manager</h3>
+            <p class="text-sm text-gray-500">Gestion des stocks, prix et enregistrement 360° des produits.</p>
+        </a>
+
+        <!-- Registration -->
+        <a href="#" onclick="openModule('/register')" class="glass p-8 rounded-2xl card-hover text-left">
+            <div class="text-purple-500 text-3xl mb-4"><i class="fas fa-user-plus"></i></div>
+            <h3 class="text-xl font-bold mb-2">Face ID Setup</h3>
+            <p class="text-sm text-gray-500">Inscription biométrique multi-poses pour les nouveaux clients.</p>
+        </a>
+
+        <!-- API Docs -->
+        <a href="#" onclick="openModule('/docs')" class="glass p-8 rounded-2xl card-hover text-left opacity-50">
+            <div class="text-gray-400 text-3xl mb-4"><i class="fas fa-code"></i></div>
+            <h3 class="text-xl font-bold mb-2">API Reference</h3>
+            <p class="text-sm text-gray-500">Documentation technique Swagger pour les développeurs.</p>
+        </a>
+
+    </div>
+
+    <footer class="mt-20 text-gray-600 text-xs uppercase tracking-widest">
+        Powered by Hyflex Vision Engine &copy; 2024
+    </footer>
+
+    <script>
+        function saveIp() {
+            const ip = document.getElementById('serverIp').value;
+            if(!ip) return alert("Entrez une IP !");
+            localStorage.setItem('hyflex_server', ip);
+            alert("Serveur configuré : " + ip);
+        }
+
+        function openModule(path) {
+            let ip = localStorage.getItem('hyflex_server');
+            if(!ip) {
+                alert("Veuillez d'abord configurer l'IP du serveur en haut de la page.");
+                return;
+            }
+            // Ajoute le protocole si manquant
+            if(!ip.startsWith('http')) ip = 'https://' + ip;
+            if(!ip.includes(':8000') && !ip.includes('vercel') && !ip.includes('ngrok')) ip = ip + ':8000';
+            
+            window.location.href = ip + path;
+        }
+
+        // Pré-remplissage
+        window.onload = () => {
+            const saved = localStorage.getItem('hyflex_server');
+            if(saved) document.getElementById('serverIp').value = saved;
+        }
+    </script>
+</body>
+</html>

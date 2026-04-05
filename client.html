@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mon Espace - DALL JAMM</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="config.js"></script>
+    <style>
+        body { 
+            background-image: linear-gradient(rgba(10, 10, 12, 0.95), rgba(10, 10, 12, 0.95)), url('https://i.postimg.cc/Cx0pYgC2/photo-de-espcae-tudiant-africain.jpg');
+            background-size: cover; background-attachment: fixed; color: #fff; font-family: 'Inter', sans-serif; 
+        }
+        .glass { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1); }
+        .badge-gradient { background: linear-gradient(135deg, #1C2B5A 0%, #432284 100%); }
+    </style>
+</head>
+<body class="min-h-screen p-4 flex flex-col items-center">
+    <header class="w-full max-w-lg flex justify-between items-center py-4 mb-6">
+        <div class="flex items-center gap-2">
+            <img src="https://i.postimg.cc/5HMmW3HK/logo-abm-edu-pilote.png" class="w-8 h-8 bg-white rounded p-1">
+            <span class="font-bold tracking-tight">DALL JAMM</span>
+        </div>
+        <a href="/" class="text-gray-400 hover:text-white"><i class="fas fa-sign-out-alt"></i></a>
+    </header>
+
+    <main class="w-full max-w-md space-y-6">
+        <!-- Badge Numérique Client -->
+        <div class="badge-gradient rounded-3xl p-6 shadow-2xl text-center relative overflow-hidden" id="client-badge">
+            <div class="absolute top-0 right-0 p-4 opacity-20"><i class="fas fa-wifi text-4xl rotate-45"></i></div>
+            
+            <h2 class="text-xl font-bold mb-1" id="clientName">Chargement...</h2>
+            <p class="text-xs text-cyan-300 font-mono mb-4" id="clientIdDisplay">CLIENT-ID-PENDING</p>
+            
+            <div class="bg-white p-3 rounded-2xl inline-block mb-4 shadow-inner">
+                <div id="qr-code-area" class="w-32 h-32 flex items-center justify-center">
+                    <div class="animate-pulse bg-gray-200 w-full h-full rounded"></div>
+                </div>
+            </div>
+
+            <div class="flex justify-between items-center mt-2 px-2">
+                <div class="text-left">
+                    <p class="text-[10px] text-gray-400 uppercase">Solde Wallet</p>
+                    <p class="text-xl font-black text-green-400" id="clientBalance">0 FCFA</p>
+                </div>
+                <button onclick="downloadBadge()" class="bg-white/10 hover:bg-white/20 p-3 rounded-full transition">
+                    <i class="fas fa-download"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="grid grid-cols-2 gap-4">
+            <div class="glass p-4 rounded-2xl text-center">
+                <i class="fas fa-id-card text-cyan-400 text-xl mb-1"></i>
+                <p class="text-xs font-semibold">RFID Actif</p>
+                <p class="text-[10px] text-gray-500" id="rfidNumber">Non assigné</p>
+            </div>
+            <div class="glass p-4 rounded-2xl text-center">
+                <i class="fas fa-shopping-basket text-orange-400 text-xl mb-1"></i>
+                <p class="text-xs font-semibold">Dernier Achat</p>
+                <p class="text-[10px] text-gray-500" id="lastSeen">Il y a --</p>
+            </div>
+        </div>
+
+        <!-- Historique -->
+        <div class="glass p-6 rounded-3xl">
+            <h3 class="font-bold text-sm mb-4 flex items-center gap-2">
+                <i class="fas fa-history text-gray-400"></i> Transactions Récentes
+            </h3>
+            <div id="transactionsList" class="space-y-4">
+                <p class="text-gray-500 text-center" id="noTransactions">Aucune transaction pour le moment.</p>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        function getUrlParameter(name) {
+            name = name.replace(/[\[]/, '\\[').replace(/[\]]/, '\\]');
+            var regex = new RegExp('[\\?&]' + name + '=([^&#]*)');
+            var results = regex.exec(location.search);
+            return results === null ? '' : decodeURIComponent(results[1].replace(/\+/g, ' '));
+        };
+
+        let userId = getUrlParameter('user_id');
+        if (!userId) {
+            userId = prompt("Veuillez entrer votre nom d'utilisateur pour accéder à votre portefeuille :");
+            if (userId) {
+                // Rediriger avec le user_id dans l'URL pour un accès futur plus simple
+                window.location.href = window.location.pathname + '?user_id=' + encodeURIComponent(userId);
+            } else {
+                alert("Nom d'utilisateur requis pour accéder au portefeuille.");
+                window.location.href = '/';
+            }
+        }
+
+        async function fetchClientData() {
+            const server = localStorage.getItem('hyflex_server') || window.location.hostname;
+            const baseUrl = `https://${server}:8000`;
+            
+            try {
+                const response = await fetch(`${baseUrl}/api/client_data/${encodeURIComponent(userId)}`);
+                const data = await response.json();
+                
+                document.getElementById('clientName').innerText = userId;
+                document.getElementById('clientIdDisplay').innerText = `ID: ${userId.toUpperCase().replace(/\s/g, '-')}`;
+                document.getElementById('clientBalance').innerText = `${data.balance} FCFA`;
+                
+                // Générer le QR Code (Identification Client)
+                const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=DALLJAMM-USER:${encodeURIComponent(userId)}`;
+                document.getElementById('qr-code-area').innerHTML = `<img src="${qrUrl}" class="w-full">`;
+
+                const transactionsList = document.getElementById('transactionsList');
+                transactionsList.innerHTML = '';
+                if (data.transactions.length === 0) {
+                    transactionsList.innerHTML = '<p class="text-gray-500 text-center text-xs">Aucun achat détecté.</p>';
+                } else {
+                    data.transactions.forEach(transaction => {
+                        const transactionDiv = document.createElement('div');
+                        transactionDiv.className = 'bg-white/5 p-3 rounded-xl flex justify-between items-center border border-white/5';
+                        transactionDiv.innerHTML = `
+                            <div>
+                                <p class="text-sm font-bold">${transaction.produit.toUpperCase()}</p>
+                                <p class="text-[10px] text-gray-500">${new Date(transaction.timestamp).toLocaleTimeString()}</p>
+                            </div>
+                            <p class="text-sm font-black text-red-400">-${transaction.montant}</p>
+                        `;
+                        transactionsList.prepend(transactionDiv);
+                    });
+                }
+            } catch (error) {
+                console.error("Erreur lors de la récupération des données client:", error);
+                alert("Impossible de charger les données du client. Assurez-vous que le serveur est en ligne et que l'IP est correcte.");
+            }
+        }
+
+        async function downloadBadge() {
+            const badge = document.getElementById('client-badge');
+            const canvas = await html2canvas(badge, { backgroundColor: null, scale: 2 });
+            const link = document.createElement('a');
+            link.download = `DALLJAMM-BADGE-${userId}.png`;
+            link.href = canvas.toDataURL();
+            link.click();
+        }
+
+        fetchClientData();
+    </script>
+</body>
+</html>

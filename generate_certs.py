@@ -44,9 +44,9 @@ subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"abm.edup
 cert_builder = x509.CertificateBuilder().subject_name(subject).issuer_name(issuer).public_key(
     key.public_key()
 ).serial_number(x509.random_serial_number()).not_valid_before(
-    datetime.datetime.utcnow()
+    datetime.datetime.now(datetime.timezone.utc)
 ).not_valid_after(
-    datetime.datetime.utcnow() + datetime.timedelta(days=365)
+    datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365)
 ).add_extension(
     x509.SubjectAlternativeName([x509.DNSName(u"localhost"), x509.IPAddress(ipaddress.ip_address(local_ip))]),
     critical=False,
