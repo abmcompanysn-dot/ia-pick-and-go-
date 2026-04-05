@@ -155,7 +155,7 @@
                 </div>
             </div>
             
-            <button onclick="location.reload()" class="w-full text-red-500 font-bold text-xs uppercase tracking-widest pt-4">Se déconnecter</button>
+            <button onclick="logout()" class="w-full text-red-500 font-bold text-xs uppercase tracking-widest pt-4">Se déconnecter</button>
         </div>
     </div>
 
@@ -190,14 +190,6 @@ let currentUser;
 let faceStream = null;
 // Au chargement de la page, on vérifie si un utilisateur est déjà connecté
 window.addEventListener('DOMContentLoaded', () => {
-    // Injection de la fonction renderBalanceOnly si elle manque
-    window.renderBalanceOnly = function() {
-        const el = document.getElementById('display-balance');
-        if (el && currentUser) {
-            el.innerText = `${currentUser.balance.toLocaleString()} FCFA`;
-        }
-    };
-
     const savedUser = localStorage.getItem('jeldem_session');
     if (savedUser) {
         currentUser = JSON.parse(savedUser);
@@ -246,16 +238,16 @@ async function login() {
         };
 
         // Note: Google Apps Script nécessite souvent redirect: 'follow'
-        const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+        const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload), redirect: 'follow' });
         const data = await res.json();
         
-        if(res.ok) {
+        if(data.success) {
             currentUser = data.user_data;
             // Sauvegarder la session
             localStorage.setItem('jeldem_session', JSON.stringify(currentUser));
             showDashboard();
         } else {
-            alert(data.detail || "Identifiants incorrects");
+            alert(data.message || "Identifiants incorrects");
         }
     } catch(e) {
         alert("Erreur de connexion serveur.");
@@ -265,6 +257,14 @@ async function login() {
 function logout() {
     if(confirm("Voulez-vous vous déconnecter ?")) {
         localStorage.removeItem('jeldem_session');
+        location.reload();
+    }
+}
+
+function logout() {
+    if(confirm("Voulez-vous vous déconnecter ?")) {
+        localStorage.removeItem('jeldem_session');
+        currentUser = null;
         location.reload();
     }
 }
@@ -287,8 +287,9 @@ async function register() {
                 password: pass
             }
         };
-        const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
-        if(res.ok) {
+        const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload), redirect: 'follow' });
+        const data = await res.json();
+        if(data.success) {
             alert("Bienvenue chez JEL DEM ! Connectez-vous maintenant.");
             toggleAuthMode('login');
             document.getElementById('user-phone').value = phone;
@@ -307,8 +308,9 @@ async function updatePassword() {
         payload: { phone: currentUser.phone, newPassword: newPass }
     };
     
-    const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
-    if(res.ok) {
+    const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload), redirect: 'follow' });
+    const data = await res.json();
+    if(data.success) {
         alert("Mot de passe JEL DEM mis à jour !");
         document.getElementById('new-password').value = "";
         // Mettre à jour le mot de passe dans le stockage local n'est pas nécessaire car on stocke les infos de profil
@@ -321,10 +323,10 @@ async function recharge(amount) {
         payload: { phone: currentUser.phone, amount: amount }
     };
     
-    const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+    const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload), redirect: 'follow' });
     const data = await res.json();
 
-    if(res.ok) {
+    if(data.success) {
         alert(`+${amount} FCFA crédités sur JEL DEM`);
         currentUser.balance = data.newBalance;
         localStorage.setItem('jeldem_session', JSON.stringify(currentUser));
@@ -338,6 +340,7 @@ function showDashboard() {
     document.getElementById('bottom-nav').classList.remove('hidden');
     
     renderBalanceOnly();
+    switchTab('tab-id'); // Retour à l'onglet par défaut
 
     // Remplissage du Profil
     document.getElementById('prof-name').innerText = currentUser.name;
