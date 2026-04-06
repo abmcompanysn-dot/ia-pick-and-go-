@@ -16,12 +16,18 @@
         .btn-orange { background-color: #f97316; color: white; transition: all 0.2s; }
         .btn-orange:hover { background-color: #ea580c; transform: translateY(-1px); }
         .card-balance { background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%); color: white; }
+        .loader { border: 2px solid #f3f3f3; border-top: 2px solid #f97316; border-radius: 50%; width: 18px; height: 18px; animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; margin-left: 8px; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .status-dot { width: 8px; height: 8px; background: #22c55e; border-radius: 50%; display: inline-block; margin-right: 5px; box-shadow: 0 0 5px #22c55e; }
     </style>
 </head>
 <body class="p-4 max-w-md mx-auto bg-gray-50 min-h-screen">
     <header class="flex justify-between items-center mb-8 pt-4">
         <h1 class="text-2xl font-extrabold tracking-tighter text-gray-900">JEL <span class="text-dall-orange">DEM</span></h1>
-        <div class="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center text-green-600 font-bold">JM</div>
+        <div class="flex items-center gap-2">
+            <div id="connection-indicator" class="hidden text-[10px] font-bold text-green-600 bg-green-50 px-2 py-1 rounded-full"><span class="status-dot"></span> LIVE</div>
+            <div id="user-initials" class="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center text-green-600 font-bold">?</div>
+        </div>
     </header>
 
     <!-- Section Login/Inscription -->
@@ -32,7 +38,7 @@
         </div>
 
         <!-- Formulaire Connexion -->
-        <div id="form-login" class="space-y-4">
+        <form id="form-login" class="space-y-4" onsubmit="event.preventDefault(); login();">
             <div class="text-left">
                 <label class="text-[10px] font-bold text-gray-400 uppercase ml-1">Téléphone</label>
                 <input type="tel" id="user-phone" placeholder="77 000 00 00" class="w-full bg-gray-100 border-none p-4 rounded-2xl text-lg focus:ring-2 focus:ring-orange-500 outline-none">
@@ -41,17 +47,17 @@
                 <label class="text-[10px] font-bold text-gray-400 uppercase ml-1">Code PIN / Passe</label>
                 <input type="password" id="user-password-login" placeholder="••••" class="w-full bg-gray-100 border-none p-4 rounded-2xl text-lg focus:ring-2 focus:ring-orange-500 outline-none">
             </div>
-            <button onclick="login()" class="w-full btn-orange font-bold p-4 rounded-2xl shadow-lg mt-4 uppercase tracking-widest text-sm">Se Connecter</button>
-        </div>
+            <button type="submit" id="login-btn" class="w-full btn-orange font-bold p-4 rounded-2xl shadow-lg mt-4 uppercase tracking-widest text-sm">Se Connecter <span id="login-loader" class="hidden"><span class="loader"></span></span></button>
+        </form>
 
         <!-- Formulaire Inscription -->
-        <div id="form-register" class="hidden space-y-3">
+        <form id="form-register" class="hidden space-y-3" onsubmit="event.preventDefault(); register();">
             <input type="text" id="reg-name" placeholder="Nom complet" class="w-full bg-gray-100 border-none p-4 rounded-2xl outline-none focus:ring-2 focus:ring-green-500">
             <input type="tel" id="reg-phone" placeholder="Numéro de téléphone" class="w-full bg-gray-100 border-none p-4 rounded-2xl outline-none focus:ring-2 focus:ring-green-500">
             <input type="email" id="reg-email" placeholder="Email (Reçus)" class="w-full bg-gray-100 border-none p-4 rounded-2xl outline-none focus:ring-2 focus:ring-green-500">
             <input type="password" id="reg-password" placeholder="Créer un Code PIN" class="w-full bg-gray-100 border-none p-4 rounded-2xl outline-none focus:ring-2 focus:ring-green-500">
-            <button onclick="register()" class="w-full bg-green-500 text-white font-bold p-4 rounded-2xl shadow-lg mt-2 uppercase tracking-widest text-sm">Créer mon compte</button>
-        </div>
+            <button type="submit" class="w-full bg-green-500 text-white font-bold p-4 rounded-2xl shadow-lg mt-2 uppercase tracking-widest text-sm">Créer mon compte</button>
+        </form>
     </div>
 
     <!-- Section Dashboard (Cachée par défaut) -->
@@ -82,9 +88,14 @@
         <!-- ONGLET 3: PAIEMENT (SOLDE & RECHARGE) -->
         <div id="tab-paiement" class="tab-content hidden">
             <div class="card-balance rounded-3xl p-8 mb-6 shadow-xl relative overflow-hidden">
-                <div class="relative z-10">
-                    <p class="text-white/80 font-bold text-xs uppercase tracking-widest mb-1">Solde JEL DEM</p>
-                    <h3 class="text-4xl font-black" id="display-balance">0 FCFA</h3>
+                <div class="relative z-10 flex justify-between items-start">
+                    <div>
+                        <p class="text-white/80 font-bold text-xs uppercase tracking-widest mb-1">Solde JEL DEM</p>
+                        <h3 class="text-4xl font-black" id="display-balance">0 FCFA</h3>
+                    </div>
+                    <button onclick="refreshUserData(true)" class="bg-white/20 hover:bg-white/30 p-2 rounded-full transition-all text-white" title="Rafraîchir">
+                        <i id="refresh-icon" class="fas fa-sync-alt"></i>
+                    </button>
                 </div>
             </div>
             <div class="glass p-6 rounded-3xl mb-8">
@@ -137,7 +148,7 @@
                 
                 <div id="face-id-status" class="bg-gray-50 p-4 rounded-2xl border border-gray-100 flex items-center justify-between">
                     <div class="flex items-center gap-3">
-                        <div class="w-10 h-10 rounded-full bg-white flex items-center justify-center text-orange-500 shadow-sm">
+                        <div id="face-icon-box" class="w-10 h-10 rounded-full bg-white flex items-center justify-center text-orange-500 shadow-sm">
                             <i class="fas fa-face-smile"></i>
                         </div>
                         <div>
@@ -145,14 +156,14 @@
                             <p class="text-xs font-bold" id="face-status-text">Non configuré</p>
                         </div>
                     </div>
-                    <button onclick="setupFaceID()" class="text-[10px] font-black text-orange-600 bg-orange-100 px-3 py-2 rounded-lg uppercase">Configurer</button>
+                    <button id="face-setup-btn" onclick="setupFaceID()" class="text-[10px] font-black text-orange-600 bg-orange-100 px-3 py-2 rounded-lg uppercase">Configurer</button>
                 </div>
 
-                <div class="space-y-2">
+                <form class="space-y-2" onsubmit="event.preventDefault(); updatePassword();">
                     <label class="text-[10px] font-bold text-gray-400 uppercase ml-1">Changer le Code PIN</label>
                     <input type="password" id="new-password" placeholder="Nouveau code PIN" class="w-full bg-gray-100 p-4 rounded-2xl outline-none focus:ring-2 focus:ring-orange-500 transition-all">
-                    <button onclick="updatePassword()" class="w-full bg-gray-800 text-white font-bold p-4 rounded-2xl shadow-lg">METTRE À JOUR</button>
-                </div>
+                    <button type="submit" class="w-full bg-gray-800 text-white font-bold p-4 rounded-2xl shadow-lg">METTRE À JOUR</button>
+                </form>
             </div>
             
             <button onclick="logout()" class="w-full text-red-500 font-bold text-xs uppercase tracking-widest pt-4">Se déconnecter</button>
@@ -185,9 +196,11 @@
 
     <script>
 // REMPLACEZ PAR VOTRE URL DE DÉPLOIEMENT GOOGLE APPS SCRIPT
-const API_URL = "https://script.google.com/macros/s/AKfycbxGjUmpz3yBSJpfZ9fvZsg8zIxsqSS8jRWEIA04uX3_5dWdmyAnqExj18RqtMPhyRupxA/exec";
-let currentUser;
+const API_URL = "https://script.google.com/macros/s/AKfycbxxSOZyptRBlGr0svsXlWzjANkMK8RRz03gVizG56nS6KsIfyVW0ghuyxonCY7ebqYGjQ/exec";
+let currentUser = null;
 let faceStream = null;
+let balanceInterval = null;
+
 // Au chargement de la page, on vérifie si un utilisateur est déjà connecté
 window.addEventListener('DOMContentLoaded', () => {
     const urlParams = new URLSearchParams(window.location.search);
@@ -217,14 +230,18 @@ function toggleAuthMode(mode) {
 
 function switchTab(tabId) {
     document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
-    document.getElementById(tabId).classList.remove('hidden');
+    const targetTab = document.getElementById(tabId);
+    if (targetTab) targetTab.classList.remove('hidden');
     
     document.querySelectorAll('.nav-btn').forEach(btn => {
         btn.classList.remove('bg-green-50', 'text-green-600');
         btn.classList.add('text-gray-400');
+        const onClick = btn.getAttribute('onclick');
+        if (onClick && onClick.includes(tabId)) {
+            btn.classList.add('bg-green-50', 'text-green-600');
+            btn.classList.remove('text-gray-400');
+        }
     });
-    event.currentTarget.classList.add('bg-green-50', 'text-green-600');
-    event.currentTarget.classList.remove('text-gray-400');
 }
 
 function renderBalanceOnly() {
@@ -234,11 +251,47 @@ function renderBalanceOnly() {
     }
 }
 
+async function refreshUserData(manual = false) {
+    if (!currentUser) return;
+    const icon = document.getElementById('refresh-icon');
+    if (manual && icon) icon.classList.add('fa-spin');
+    
+    try {
+        const res = await fetch(API_URL, { 
+            method: 'POST', 
+            body: JSON.stringify({ action: "login", payload: { phone: currentUser.phone } }) 
+        });
+        const data = await res.json();
+        if (data.success) {
+            currentUser = data.user_data;
+            localStorage.setItem('jeldem_session', JSON.stringify(currentUser));
+            updateUI();
+        }
+    } catch (e) {
+        console.error("Erreur refresh:", e);
+    } finally {
+        if (manual && icon) {
+            setTimeout(() => icon.classList.remove('fa-spin'), 500);
+        }
+    }
+}
+
+function updateUI() {
+    renderBalanceOnly();
+    renderTransactions();
+    
+    // Mise à jour des stats globales dans l'onglet réglages
+    const totalSpent = currentUser.transactions.reduce((acc, t) => acc + (parseFloat(t.montant) || 0), 0);
+    document.getElementById('stat-total').innerText = `${totalSpent.toLocaleString()} F`;
+    document.getElementById('stat-count').innerText = currentUser.transactions.length;
+}
+
 async function login() {
     const phone = document.getElementById('user-phone').value;
     const pass = document.getElementById('user-password-login').value;
     if(!phone || !pass) return alert("Veuillez remplir tous les champs");
 
+    setLoading('login-btn', true);
     try {
         const payload = {
             action: "login",
@@ -248,7 +301,8 @@ async function login() {
         // Envoi en mode 'no-cors' ou simple texte pour éviter le blocage CORS Google
         const res = await fetch(API_URL, { 
             method: 'POST', 
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            redirect: 'follow'
         });
         const data = await res.json();
         
@@ -262,22 +316,23 @@ async function login() {
         }
     } catch(e) {
         alert("Erreur de connexion serveur.");
+    } finally {
+        setLoading('login-btn', false);
     }
 }
 
 function logout() {
     if(confirm("Voulez-vous vous déconnecter ?")) {
         localStorage.removeItem('jeldem_session');
-        location.reload();
+        w.location.reload();
     }
 }
 
-function logout() {
-    if(confirm("Voulez-vous vous déconnecter ?")) {
-        localStorage.removeItem('jeldem_session');
-        currentUser = null;
-        location.reload();
-    }
+function setLoading(btnId, isLoading) {
+    const btn = document.getElementById(btnId);
+    const loader = btn.querySelector('.loader')?.parentElement;
+    if (btn) btn.disabled = isLoading;
+    if (loader) loader.classList.toggle('hidden', !isLoading);
 }
 
 async function register() {
@@ -298,7 +353,11 @@ async function register() {
                 password: pass
             }
         };
-        const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload), redirect: 'follow' });
+        const res = await fetch(API_URL, { 
+            method: 'POST', 
+            body: JSON.stringify(payload),
+            redirect: 'follow'
+        });
         const data = await res.json();
         if(data.success) {
             alert("Bienvenue chez JEL DEM ! Connectez-vous maintenant.");
@@ -319,7 +378,11 @@ async function updatePassword() {
         payload: { phone: currentUser.phone, newPassword: newPass }
     };
     
-    const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload), redirect: 'follow' });
+    const res = await fetch(API_URL, { 
+        method: 'POST', 
+        body: JSON.stringify(payload),
+        redirect: 'follow'
+    });
     const data = await res.json();
     if(data.success) {
         alert("Mot de passe JEL DEM mis à jour !");
@@ -329,26 +392,34 @@ async function updatePassword() {
 }
 
 async function recharge(amount) {
-    if(!confirm(`Confirmer le dépôt de ${amount} FCFA via Wave (PayDunya) ?`)) return;
+    if(!confirm(`Vous allez être redirigé vers PayDunya pour un dépôt de ${amount} FCFA. Continuer ?`)) return;
     
     const payload = {
         action: "initiatePayDunya",
-        payload: { phone: currentUser.phone, amount: amount, provider: 'wave' }
+        payload: { phone: currentUser.phone, amount: amount }
     };
     
-    const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+    const res = await fetch(API_URL, { 
+        method: 'POST', 
+        body: JSON.stringify(payload),
+        redirect: 'follow'
+    });
     const data = await res.json();
 
-    if(data.success) {
-        alert(`✅ Succès PayDunya : +${amount} FCFA crédités sur votre compte JEL DEM`);
-        currentUser.balance = data.newBalance;
-        localStorage.setItem('jeldem_session', JSON.stringify(currentUser));
-        renderBalanceOnly();
+    if(data.success && data.url) {
+        // Redirection vers la page de paiement PayDunya
+        window.location.href = data.url;
+    } else {
+        alert("Erreur PayDunya : " + (data.message || "Impossible d'initier le paiement"));
     }
 }
 
 async function loadPublicProfile(phone) {
-    const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify({action: 'getUserProfile', payload: {phone}})});
+    const res = await fetch(API_URL, { 
+        method: 'POST', 
+        body: JSON.stringify({action: 'getUserProfile', payload: {phone}}),
+        redirect: 'follow'
+    });
     const data = await res.json();
     if(data.success) {
         alert(`Profil Scanné : ${data.user.name}\nSolde : ${data.user.balance} FCFA\nFace ID : ${data.user.face_active}`);
@@ -359,14 +430,25 @@ function showDashboard() {
     document.getElementById('auth-section').classList.add('hidden');
     document.getElementById('dashboard').classList.remove('hidden');
     document.getElementById('bottom-nav').classList.remove('hidden');
-    
-    renderBalanceOnly();
+    document.getElementById('connection-indicator').classList.remove('hidden');
+
+    if (currentUser.name) {
+        const names = currentUser.name.split(' ');
+        document.getElementById('user-initials').innerText = (names[0][0] + (names[1] ? names[1][0] : '')).toUpperCase();
+    }
+
+    // Démarrer le rafraîchissement automatique du solde (toutes le 10s)
+    if (balanceInterval) clearInterval(balanceInterval);
+    balanceInterval = setInterval(refreshUserData, 10000);
+
+    updateUI();
     switchTab('tab-id'); // Retour à l'onglet par défaut
 
     // Remplissage du Profil
     document.getElementById('prof-name').innerText = currentUser.name;
     document.getElementById('prof-phone').innerText = currentUser.phone;
-    const rfidCode = `JD-${currentUser.phone.substring(0,3)}-${currentUser.phone.substring(currentUser.phone.length - 3)}`;
+    const phoneStr = String(currentUser.phone);
+    const rfidCode = `JD-${phoneStr.substring(0,3)}-${phoneStr.slice(-3)}`;
     document.getElementById('prof-rfid').innerText = rfidCode;
     
     // Mise à jour visuelle du statut Face ID
@@ -377,34 +459,36 @@ function showDashboard() {
 
     faceStatusText.innerText = isFaceActive ? "ACTIVÉ & SÉCURISÉ" : "NON CONFIGURÉ";
     faceStatusText.className = isFaceActive ? "text-xs font-black text-green-600" : "text-xs font-black text-gray-500";
-    faceIconBox.className = isFaceActive ? "w-10 h-10 rounded-full bg-green-100 flex items-center justify-center shadow-sm text-green-600" : "w-10 h-10 rounded-full bg-white flex items-center justify-center shadow-sm text-gray-400";
-    if(isFaceActive) faceBtn.innerHTML = '<i class="fas fa-check mr-1"></i> Prêt';
-
-    // Calcul des statistiques
-    const totalSpent = currentUser.transactions.reduce((acc, t) => acc + t.montant, 0);
-    const totalItems = currentUser.transactions.length;
-    document.getElementById('stat-total').innerText = `${totalSpent.toLocaleString()} F`;
-    document.getElementById('stat-count').innerText = totalItems;
+    if (faceIconBox) {
+        faceIconBox.className = isFaceActive ? "w-10 h-10 rounded-full bg-green-100 flex items-center justify-center shadow-sm text-green-600" : "w-10 h-10 rounded-full bg-white flex items-center justify-center shadow-sm text-gray-400";
+    }
+    if(isFaceActive && faceBtn) faceBtn.innerHTML = '<i class="fas fa-check mr-1"></i> Prêt';
 
     // Génération du QR Code via API externe
     const qrArea = document.getElementById('qr-code-display');
-    // URL de profil pour que le scan montre les infos de la personne
-    const profileUrl = window.location.href.split('?')[0] + "?view_profile=" + currentUser.phone;
+    // Utilisation de l'URL propre du site
+    const baseUrl = window.location.origin + window.location.pathname;
+    const profileUrl = baseUrl + "?view_profile=" + currentUser.phone;
     const qrData = encodeURIComponent(profileUrl);
     
     qrArea.innerHTML = `<img src="https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${qrData}" class="w-full h-full">`;
     
     // Simulation d'un ID RFID
     document.getElementById('rfid-id').innerText = `RFID: ${rfidCode}`;
+}
 
+function renderTransactions() {
     const list = document.getElementById('transactions-list');
-    list.innerHTML = currentUser.transactions.map(t => `
+    if (!list || !currentUser.transactions) return;
+    
+    // On inverse la liste pour avoir les plus récents en haut
+    list.innerHTML = currentUser.transactions.slice().reverse().map(t => `
         <div class="bg-white p-4 rounded-2xl flex justify-between items-center shadow-sm border border-gray-100">
             <div class="flex items-center gap-3">
                 <div class="w-10 h-10 bg-green-50 rounded-xl flex items-center justify-center text-green-600"><i class="fas fa-shopping-basket"></i></div>
                 <div>
                     <p class="font-bold text-sm text-gray-800">${t.produit.toUpperCase()}</p>
-                    <p class="text-[10px] text-gray-400 font-medium">${t.timestamp}</p>
+                    <p class="text-[10px] text-gray-400 font-medium">${new Date(t.timestamp).toLocaleString('fr-FR')}</p>
                 </div>
             </div>
             <p class="text-red-500 font-black text-sm">-${t.montant} F</p>
@@ -417,7 +501,11 @@ async function requestRfid() {
     if (!rfidUid) return;
     
     const payload = { action: "assignRfid", payload: { phone: currentUser.phone, rfidUid: rfidUid } };
-    await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+    await fetch(API_URL, { 
+        method: 'POST', 
+        body: JSON.stringify(payload),
+        redirect: 'follow'
+    });
     alert("Carte RFID liée avec succès !");
     location.reload();
 }
@@ -461,7 +549,11 @@ async function captureFace() {
 
     try {
         document.getElementById('face-status-text').innerText = "SYNCHRONISATION...";
-        const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+        const res = await fetch(API_URL, { 
+            method: 'POST', 
+            body: JSON.stringify(payload),
+            redirect: 'follow'
+        });
         const data = await res.json();
         if (data.success) {
             alert("Félicitations ! Votre Face ID est maintenant actif sur JEL DEM.");

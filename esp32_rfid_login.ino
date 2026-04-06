@@ -2,14 +2,16 @@
 #include <MFRC522.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 #define SS_PIN  5
 #define RST_PIN 22
 MFRC522 rfid(SS_PIN, RST_PIN);
 
-const char* ssid = "VOTRE_WIFI";
-const char* password = "VOTRE_MOT_DE_PASSE";
-const char* serverUrl = "https://VOTRE_IP_SERVEUR:8000/api/rfid_login";
+const char* ssid = "abmcy";
+const char* password = "test1234v";
+// URL Directe vers Google Apps Script
+const char* serverUrl = "https://script.google.com/macros/s/AKfycbxxSOZyptRBlGr0svsXlWzjANkMK8RRz03gVizG56nS6KsIfyVW0ghuyxonCY7ebqYGjQ/exec";
 
 void setup() {
   Serial.begin(115200);

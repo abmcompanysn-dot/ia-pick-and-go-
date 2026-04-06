@@ -50,7 +50,7 @@ def get_local_ip():
 LOCAL_IP = get_local_ip()
 
 # 1. URL DE VOTRE API GOOGLE APPS SCRIPT
-APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxGjUmpz3yBSJpfZ9fvZsg8zIxsqSS8jRWEIA04uX3_5dWdmyAnqExj18RqtMPhyRupxA/exec"
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxxSOZyptRBlGr0svsXlWzjANkMK8RRz03gVizG56nS6KsIfyVW0ghuyxonCY7ebqYGjQ/exec"
 
 # La base de données des produits sera maintenant gérée dans Google Sheets
 # Elle est chargée au démarrage depuis Google Apps Script
@@ -1449,6 +1449,7 @@ async def admin_dashboard():
                     </div>
                     <input type="password" id="pd-master" class="settings-input" placeholder="Master Key">
                     <input type="password" id="pd-private" class="settings-input" placeholder="Private Key">
+                    <input type="password" id="pd-public" class="settings-input" placeholder="Public Key">
                     <input type="password" id="pd-token" class="settings-input" placeholder="Token">
                     <button onclick="savePaySettings()" class="fs-btn" style="width:100%; margin-bottom:5px;">💾 ENREGISTRER CLÉS</button>
                     <button onclick="triggerSetup()" class="fs-btn" style="width:100%; border-color: #ff9900; color: #ff9900;">⚡ INITIALISER DB (SETUP)</button>
@@ -1480,7 +1481,7 @@ async def admin_dashboard():
         </div>
         
         <script>
-            const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxGjUmpz3yBSJpfZ9fvZsg8zIxsqSS8jRWEIA04uX3_5dWdmyAnqExj18RqtMPhyRupxA/exec";
+            const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxxSOZyptRBlGr0svsXlWzjANkMK8RRz03gVizG56nS6KsIfyVW0ghuyxonCY7ebqYGjQ/exec";
             let currentPayMode = 'test';
 
             // Charger les paramètres au démarrage
@@ -1494,6 +1495,7 @@ async def admin_dashboard():
                     if(data.success) {{
                         document.getElementById('pd-master').value = data.settings.masterKey;
                         document.getElementById('pd-private').value = data.settings.privateKey;
+                        document.getElementById('pd-public').value = data.settings.publicKey;
                         document.getElementById('pd-token').value = data.settings.token;
                         setPayMode(data.settings.mode);
                     }}
@@ -1512,6 +1514,7 @@ async def admin_dashboard():
                     payload: {{
                         masterKey: document.getElementById('pd-master').value,
                         privateKey: document.getElementById('pd-private').value,
+                        publicKey: document.getElementById('pd-public').value,
                         token: document.getElementById('pd-token').value,
                         mode: currentPayMode
                     }}
@@ -2314,24 +2317,89 @@ if __name__ == "__main__":
     print(f"   2. Cliquez sur 'Paramètres avancés' (Advanced).")
     print(f"   3. Cliquez sur 'Continuer vers {IP} (dangereux)'.")
     print(f"="*60 + "\n")
+class RfidAuth(BaseModel):
+    uid: str
+
 @app.post("/api/rfid_login")
-async def rfid_login(rfid_id: str = Form(...)):
-    """Vérifie l'UID RFID auprès d'Apps Script et autorise l'accès pour l'ESP32."""
-    payload = {"action": "login", "payload": {"rfidUid": rfid_id}}
+async def rfid_login(req: RfidAuth):
+    """Vérifie l'UID RFID, active le tracking et renvoie les infos client."""
+    payload = {"action": "login", "payload": {"rfidUid": req.uid}}
     try:
-        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=5)
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
         data = resp.json()
         
         if data.get("success") and data.get("authorized"):
-            user_name = data["user_data"]["name"]
-            # On ouvre une session active pour cette personne
-            CAMERA_USER_ASSIGNMENTS["CAM_1"] = user_name
-            return {"status": "success", "authorized": True, "user": user_name}
+            user_info = data["user_data"]
+            user_name = user_info["name"]
+            user_phone = user_info.get("phone", "Unknown")
+            
+            # ACTIVER LE TRACKING IMMÉDIATEMENT
+            # On assigne cet utilisateur à toutes les caméras actives
+            for cam_id in list(LATEST_FRAME_BYTES.keys()):
+                CAMERA_USER_ASSIGNMENTS[cam_id] = user_name
+            
+            print(f"🔓 ACCÈS ACCORDÉ : {user_name} est entré.")
+            
+            return {
+                "status": "success", 
+                "authorized": True, 
+                "user": user_name,
+                "uid": req.uid,
+                "balance": user_info.get("balance"),
+                "photo": f"https://api.qrserver.com/v1/create-qr-code/?size=100x100&data={user_phone}" # Fallback photo
+            }
         
-        return {"status": "error", "authorized": False, "message": "Badge inconnu ou désactivé"}
+        return {"status": "error", "authorized": False, "message": "Badge inconnu"}
     except Exception as e:
-        print(f"Erreur RFID Login: {e}")
-        return {"status": "error", "authorized": False, "message": "Erreur serveur"}
+        print(f"Erreur RFID Proxy: {e}")
+        return {"status": "error", "authorized": False}
+
+@app.get("/api/users_list")
+async def get_users_list():
+    """Récupère la liste des utilisateurs pour le manager."""
+    try:
+        payload = {"action": "login", "payload": {"phone": "admin_list"}} # Trigger simulé pour lister
+        # Note: Dans un vrai système, on ajouterait une action 'getUsers' dans l'Apps Script
+        # Ici on va simuler ou appeler une fonction Apps Script dédiée
+        resp = requests.post(APPS_SCRIPT_URL, json={"action": "getUsers"})
+        return resp.json()
+    except:
+        # Fallback local basé sur les Wallets si Google est lent
+        return [{"name": k, "phone": "---"} for k in WALLETS.keys()]
+
+@app.post("/api/assign_badge")
+async def assign_badge(phone: str = Form(...), rfid_uid: str = Form(...)):
+    """Assigne un UID RFID à un utilisateur via son téléphone."""
+    payload = {
+        "action": "assignRfid",
+        "payload": {"phone": phone, "rfidUid": rfid_uid}
+    }
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json=payload)
+        if resp.status_code == 200:
+            print(f"🗃️ Badge {rfid_uid} assigné à {phone}")
+            return {"status": "success"}
+        return {"status": "error"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000, ssl_keyfile="key.pem", ssl_certfile="cert.pem")
+@app.post("/api/assign_badge")
+async def assign_badge(phone: str = Form(...), rfid_uid: str = Form(...)):
+    """Assigne un UID RFID à un utilisateur via son téléphone."""
+    payload = {
+        "action": "assignRfid",
+        "payload": {"phone": phone, "rfidUid": rfid_uid}
+    }
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json=payload)
+        if resp.status_code == 200:
+            print(f"🗃️ Badge {rfid_uid} assigné à {phone}")
+            return {"status": "success"}
+        return {"status": "error"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, ssl_keyfile="key.pem", ssl_certfile="cert.pem")

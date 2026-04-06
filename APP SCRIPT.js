@@ -11,12 +11,30 @@ function onOpen() {
 
 // --- GESTION DYNAMIQUE DES PARAMÈTRES ---
 function getPayDunyaConfig() {
+  const ss = getDb();
+  const sheet = ss.getSheetByName('Configuration');
+  if (sheet) {
+    const data = sheet.getDataRange().getValues();
+    let config = {};
+    data.forEach(row => {
+      if (row[0] === 'PAYDUNYA_MASTER_KEY') config.masterKey = row[1];
+      if (row[0] === 'PAYDUNYA_PRIVATE_KEY') config.privateKey = row[1];
+      if (row[0] === 'PAYDUNYA_PUBLIC_KEY') config.publicKey = row[1];
+      if (row[0] === 'PAYDUNYA_TOKEN') config.token = row[1];
+      if (row[0] === 'PAYDUNYA_MODE') config.mode = row[1];
+      if (row[0] === 'PYTHON_SERVER_URL') config.pythonUrl = row[1];
+    });
+    if (config.masterKey || config.pythonUrl) return config;
+  }
+
   const props = PropertiesService.getScriptProperties();
   return {
     masterKey: props.getProperty('PAYDUNYA_MASTER_KEY') || "",
     privateKey: props.getProperty('PAYDUNYA_PRIVATE_KEY') || "",
+    publicKey: props.getProperty('PAYDUNYA_PUBLIC_KEY') || "",
     token: props.getProperty('PAYDUNYA_TOKEN') || "",
-    mode: props.getProperty('PAYDUNYA_MODE') || "test" // "test" ou "live"
+    mode: props.getProperty('PAYDUNYA_MODE') || "test",
+    pythonUrl: props.getProperty('PYTHON_SERVER_URL') || ""
   };
 }
 
@@ -68,8 +86,10 @@ function setupDatabase() {
       if (name === 'Configuration') {
         sheet.appendRow(['PAYDUNYA_MASTER_KEY', '']);
         sheet.appendRow(['PAYDUNYA_PRIVATE_KEY', '']);
+        sheet.appendRow(['PAYDUNYA_PUBLIC_KEY', '']);
         sheet.appendRow(['PAYDUNYA_TOKEN', '']);
         sheet.appendRow(['PAYDUNYA_MODE', 'test']);
+        sheet.appendRow(['PYTHON_SERVER_URL', '']);
       }
     }
   });
@@ -105,6 +125,38 @@ function doPost(e) {
       }
       result = products;
 
+    } else if (action === 'requestDoorAccess') {
+      // RELAIS VERS LE SERVEUR PYTHON (FastAPI)
+      const config = getPayDunyaConfig();
+      const pythonServerUrl = config.pythonUrl + "/api/rfid_login"; 
+      
+      const forwardPayload = {
+        uid: data.data.rfidId
+      };
+
+      const options = {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify(forwardPayload),
+        muteHttpExceptions: true
+      };
+
+      try {
+        const response = UrlFetchApp.fetch(pythonServerUrl, options);
+        const serverResponse = JSON.parse(response.getContentText());
+        
+        // On reformate la réponse pour que l'ESP32 la comprenne bien
+        result = {
+          authorized: serverResponse.authorized || false,
+          user_data: {
+            name: serverResponse.user || "Utilisateur",
+            balance: serverResponse.balance || 0
+          }
+        };
+      } catch (e) {
+        result = { authorized: false, message: "Erreur liaison Python: " + e.toString() };
+      }
+
     } else if (action === 'addProduct') {
       let sheet = ss.getSheetByName("Produits");
       if (!sheet) { setupDatabase(); sheet = ss.getSheetByName("Produits"); }
@@ -135,12 +187,14 @@ function doPost(e) {
        
        // ENVOI D'EMAIL DE BIENVENUE
        if (email !== "Non renseigné") {
-         const subject = "Bienvenue chez JEL DEM !";
-         const body = `Bonjour ${data.payload.name},\n\n` +
-                      `Votre compte JEL DEM a été créé avec succès.\n` +
-                      `Vous pouvez maintenant utiliser votre QR Code ou votre carte RFID pour vos achats.\n\n` +
-                      `Cordialement,\nL'équipe JEL DEM`;
-         MailApp.sendEmail(email, subject, body);
+         sendStyledEmail(
+           email, 
+           "Bienvenue chez JEL DEM !", 
+           "Félicitations, votre compte est prêt !", 
+           `Bonjour <b>${data.payload.name}</b>,<br><br>` +
+           `Votre compte JEL DEM a été créé avec succès. Vous faites maintenant partie de l'avenir du shopping connecté.<br><br>` +
+           `Vous pouvez dès à présent utiliser votre <b>QR Code</b> ou votre <b>badge RFID</b> pour effectuer vos achats en toute liberté.`
+         );
        }
        
        result = { success: true, userId: newId };
@@ -208,22 +262,22 @@ function doPost(e) {
            if (transSheet) {
              const tRows = transSheet.getDataRange().getValues();
              for (let j = 1; j < tRows.length; j++) {
-               if (tRows[j][2].toString() === rows[i][0].toString() || tRows[j][2].toString() === phone.toString()) {
+               if (tRows[j][2].toString() === rows[i][0].toString() || tRows[j][2].toString() === rows[i][3].toString()) {
                  transactions.push({ produit: tRows[j][5], montant: tRows[j][6], timestamp: tRows[j][1] });
                }
              }
            }
-           // On renvoie authorized: true pour l'ESP32
+           // On renvoie les informations complètes pour l'ESP32 et l'Interface
            result = { 
              success: true, 
              authorized: true, 
              user_data: { 
                name: rows[i][1], 
-               balance: rows[i][4], 
-               phone: rows[i][3], 
+               balance: parseFloat(rows[i][4]) || 0, 
+               phone: rows[i][3].toString(), 
                face_id: rows[i][8], 
                email: rows[i][2],
-               balance: rows[i][4],
+               photo_url: "https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=" + rows[i][3],
                transactions: transactions
              } 
            };
@@ -244,12 +298,15 @@ function doPost(e) {
        
        // ENVOI D'EMAIL AUTOMATIQUE
        if (data.payload.userEmail && data.payload.userEmail !== "Non renseigné") {
-         const subject = "Confirmation d'achat - DALL JAMM";
-         const body = `Bonjour ${data.payload.userName},\n\n` +
-                      `Votre achat de ${data.payload.productName} (${data.payload.price} FCFA) a été validé.\n` +
-                      `Merci de votre confiance !\n\n` +
-                      `L'équipe DALL JAMM`;
-         MailApp.sendEmail(data.payload.userEmail, subject, body);
+         sendStyledEmail(
+           data.payload.userEmail, 
+           "Reçu de paiement - JEL DEM", 
+           "Merci pour votre achat", 
+           `Bonjour <b>${data.payload.userName}</b>,<br><br>` +
+           `Nous vous confirmons l'achat suivant :<br>` +
+           `🛒 Produit : <b>${data.payload.productName}</b><br>` +
+           `💰 Montant : <b>${data.payload.price} FCFA</b>`
+         );
        }
        
        result = { transactionId: newId };
@@ -258,15 +315,31 @@ function doPost(e) {
        // Sauvegarde des clés de l'API
        props.setProperty('PAYDUNYA_MASTER_KEY', data.payload.masterKey);
        props.setProperty('PAYDUNYA_PRIVATE_KEY', data.payload.privateKey);
+       props.setProperty('PAYDUNYA_PUBLIC_KEY', data.payload.publicKey);
        props.setProperty('PAYDUNYA_TOKEN', data.payload.token);
        props.setProperty('PAYDUNYA_MODE', data.payload.mode);
+       props.setProperty('PYTHON_SERVER_URL', data.payload.pythonUrl);
+
+       // Synchronisation avec la feuille pour visibilité et persistance
+       let sheet = ss.getSheetByName('Configuration');
+       if (sheet) {
+         const configData = [
+           ['PAYDUNYA_MASTER_KEY', data.payload.masterKey],
+           ['PAYDUNYA_PRIVATE_KEY', data.payload.privateKey],
+           ['PAYDUNYA_PUBLIC_KEY', data.payload.publicKey],
+           ['PAYDUNYA_TOKEN', data.payload.token],
+           ['PAYDUNYA_MODE', data.payload.mode],
+           ['PYTHON_SERVER_URL', data.payload.pythonUrl]
+         ];
+         sheet.getRange(2, 1, configData.length, 2).setValues(configData);
+       }
        result = { success: true };
 
     } else if (action === 'getSettings') {
        // Récupère les paramètres actuels
        result = { 
          success: true, 
-         settings: getPayDunyaConfig()
+         settings: getPayDunyaConfig() || {}
        };
 
     } else if (action === 'getUserProfile') {
@@ -292,8 +365,8 @@ function doPost(e) {
               success: true, 
               user: { 
                 name: rows[i][1], 
-                balance: rows[i][4], 
-                phone: rows[i][3],
+                balance: parseFloat(rows[i][4]) || 0, 
+                phone: rows[i][3].toString(),
                 face_active: rows[i][8],
                 face_url: faceUrl
               } 
@@ -303,20 +376,51 @@ function doPost(e) {
        }
 
     } else if (action === 'initiatePayDunya') {
-       // Intégration réelle API PayDunya (Exemple simplifié)
-       const payload = {
-         invoice: { total_amount: data.payload.amount, description: "Recharge JEL DEM" },
-         store: { name: "JEL DEM SHOP" },
-         custom_data: { phone: data.payload.phone }
-       };
-       
-       // Simulation de validation immédiate pour Wave (en attendant la configuration IPN)
-       return doPost({postData: {contents: JSON.stringify({
-         token: "SIMULATED_WAVE_TOKEN",
-         status: "completed",
-         invoice: { total_amount: data.payload.amount },
-         custom_data: { phone: data.payload.phone }
-       })}});
+      const config = getPayDunyaConfig();
+      const baseUrl = config.mode === "live" 
+        ? "https://paydunya.com/api/v1/checkout-invoice/create" 
+        : "https://paydunya.com/sandbox-api/v1/checkout-invoice/create";
+
+      const amount = data.payload.amount;
+      const phone = data.payload.phone;
+
+      const payloadPayDunya = {
+        "invoice": {
+          "total_amount": amount,
+          "description": "Recharge Wallet JEL DEM"
+        },
+        "store": {
+          "name": "JEL DEM SHOP"
+        },
+        "custom_data": {
+          "phone": phone
+        },
+        "actions": {
+          "cancel_url": "https://jeldem.abmcy.com/",
+          "return_url": "https://jeldem.abmcy.com/"
+        }
+      };
+
+      const options = {
+        "method": "post",
+        "headers": {
+          "PAYDUNYA-MASTER-KEY": config.masterKey,
+          "PAYDUNYA-PRIVATE-KEY": config.privateKey,
+          "PAYDUNYA-TOKEN": config.token,
+          "Content-Type": "application/json"
+        },
+        "payload": JSON.stringify(payloadPayDunya),
+        "muteHttpExceptions": true
+      };
+
+      const response = UrlFetchApp.fetch(baseUrl, options);
+      const resData = JSON.parse(response.getContentText());
+
+      if (resData.response_code === "00") {
+        result = { success: true, url: resData.response_text };
+      } else {
+        result = { success: false, message: "Erreur PayDunya: " + resData.response_text };
+      }
 
     } else if (action === 'paydunya_ipn') {
        // LOGIQUE IPN RÉELLE : PayDunya envoie le token de la transaction
@@ -352,7 +456,13 @@ function doPost(e) {
              result = { success: true, message: "Balance mise à jour via IPN" };
              
              // Optionnel : Envoyer un email de confirmation
-             MailApp.sendEmail(rows[i][2], "Confirmation de dépôt", `Votre compte a été crédité de ${amount} FCFA.`);
+             sendStyledEmail(
+               rows[i][2], 
+               "Compte crédité avec succès", 
+               "Confirmation de recharge", 
+               `Votre compte JEL DEM vient d'être crédité de <b>${amount} FCFA</b> via PayDunya.<br><br>` +
+               `Votre nouveau solde est de <b>${newBalance} FCFA</b>.`
+             );
              break;
            }
          }
@@ -399,6 +509,35 @@ function doPost(e) {
   }
 }
 
+/**
+ * Envoie un email stylisé HTML professionnel
+ */
+function sendStyledEmail(to, subject, title, message) {
+  const htmlBody = `
+    <div style="font-family: 'Inter', sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; border-radius: 12px; overflow: hidden;">
+      <div style="background-color: #1a1a1a; padding: 25px; text-align: center;">
+        <h1 style="color: #ffffff; margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -1px;">
+          JEL <span style="color: #f97316;">DEM</span>
+        </h1>
+      </div>
+      <div style="padding: 40px; line-height: 1.6; color: #333; background-color: #ffffff;">
+        <h2 style="color: #1a1a1a; margin-top: 0; font-size: 20px;">${title}</h2>
+        <p style="font-size: 15px;">${message}</p>
+        <div style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #eee; font-size: 11px; color: #999; text-align: center;">
+          Ceci est un message automatique de JEL DEM. Merci de ne pas y répondre directement.<br>
+          <b>JEL DEM Shop & Go</b> - Dakar, Sénégal.
+        </div>
+      </div>
+    </div>
+  `;
+  
+  MailApp.sendEmail({
+    to: to,
+    subject: subject,
+    htmlBody: htmlBody
+  });
+}
+
 function doGet(e) {
   // Lancez l'URL du script dans le navigateur une fois pour initialiser
   setupDatabase();
@@ -420,6 +559,7 @@ function verifyPayDunyaTransaction(token) {
     "headers": {
       "PAYDUNYA-MASTER-KEY": config.masterKey,
       "PAYDUNYA-PRIVATE-KEY": config.privateKey,
+      "PAYDUNYA-PUBLIC-KEY": config.publicKey,
       "PAYDUNYA-TOKEN": config.token,
       "Content-Type": "application/json"
     },
@@ -427,5 +567,11 @@ function verifyPayDunyaTransaction(token) {
   };
   
   const response = UrlFetchApp.fetch(url, options);
-  return JSON.parse(response.getContentText());
+  const content = response.getContentText();
+  try {
+    return JSON.parse(content);
+  } catch (e) {
+    console.error("Erreur parsing PayDunya: " + content);
+    return { response_code: "99", response_text: "Réponse PayDunya invalide" };
+  }
 }

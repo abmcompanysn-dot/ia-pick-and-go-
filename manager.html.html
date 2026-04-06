@@ -18,6 +18,17 @@
             <h1 class="text-3xl font-bold text-orange-400">Manager Studio</h1>
         </div>
 
+            <!-- Section Notification Temps Réel -->
+            <div class="glass p-6 rounded-2xl border-l-4 border-orange-500 mb-8" id="entryNotification" style="display:none;">
+                <div class="flex items-center gap-4">
+                    <div>
+                        <p class="text-orange-400 font-bold">DERNIÈRE ENTRÉE DÉTECTÉE</p>
+                        <h3 id="lastUserName" class="text-xl font-bold text-white">---</h3>
+                        <p id="lastUserUid" class="text-xs text-gray-500 font-mono"></p>
+                    </div>
+                </div>
+            </div>
+
         <div class="glass p-8 rounded-2xl shadow-lg mb-8">
             <h2 class="text-2xl font-semibold mb-6">📦 Ajouter un Nouveau Produit</h2>
             <form id="addProductForm" class="space-y-4">
@@ -98,11 +109,17 @@
 
         document.getElementById('addProductForm').onsubmit = async (e) => {
             e.preventDefault();
+            const btn = document.getElementById('btnAddProd');
+            const spin = document.getElementById('spinAddProd');
+            const txt = document.getElementById('txtAddProd');
+            
+            btn.disabled = true;
+            spin.style.display = "block";
+            txt.style.opacity = "0.5";
+
             const productName = document.getElementById('productName').value;
             const productPrice = document.getElementById('productPrice').value;
             const addStatus = document.getElementById('addStatus');
-            addStatus.className = "text-center text-sm mt-2";
-            addStatus.innerText = "⏳ Ajout en cours...";
 
             const formData = new FormData();
             formData.append('product_name', productName);
@@ -124,6 +141,28 @@
                 addStatus.className += " text-red-400";
                 addStatus.innerText = "Erreur réseau lors de l'ajout du produit.";
                 console.error("Erreur:", error);
+            }
+        };
+
+        document.getElementById('assignBadgeForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const phone = document.getElementById('assignPhone').value;
+            const rfid = document.getElementById('assignUid').value;
+            const status = document.getElementById('assignStatus');
+            
+            const formData = new FormData();
+            formData.append('phone', phone);
+            formData.append('rfid_uid', rfid);
+
+            try {
+                const res = await fetch(`https://${serverIp}:8000/api/assign_badge`, { method: 'POST', body: formData });
+                const data = await res.json();
+                status.innerText = data.status === "success" ? "✅ Carte assignée !" : "❌ Erreur d'assignation";
+            } catch(e) {
+                status.innerText = "❌ Erreur réseau";
+            } finally {
+                btn.disabled = false;
+                spin.style.display = "none";
             }
         };
 
