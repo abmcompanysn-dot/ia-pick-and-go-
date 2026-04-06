@@ -641,12 +641,14 @@ async def api_login(phone: str = Form(...), password: str = Form(...)):
     """Vérifie les identifiants auprès d'Apps Script."""
     payload = {"action": "login", "payload": {"phone": phone, "password": password}}
     try:
-        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=5)
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         if data.get("success"):
             return {"status": "success", "user_data": data.get("user_data")}
         raise HTTPException(status_code=401, detail=data.get("message", "Identifiants incorrects"))
+    except requests.exceptions.ConnectionError:
+        raise HTTPException(status_code=503, detail="Base de données Google Sheets injoignable.")
     except Exception as e:
         print(f"Erreur login server: {e}")
         raise HTTPException(status_code=500, detail="Erreur de communication avec la base de données")
@@ -690,7 +692,8 @@ async def api_register_simple_api(name: str = Form(...), email: str = Form(""), 
         
         return {"status": "success", "userId": name}
     except Exception as e:
-   lesp "é  dev kit u ddi  VOI PREMIEREEMEN TLES FOCN TION POU RMMMMFIQR LEREAUU JTTPP  QPP SC RITP CQ  CES T VELEC  C QIL RE ERILIR QU SYNTHEMME ET MTN     ET "     raise HTTPException(status_code=500, detail=str(e))
+        print(f"Erreur d'inscription: {e}")
+        raise HTTPException(status_code=500, detail="Erreur lors de l'inscription.")
 
 # Mise à jour des liens dans le Hub pour pointer vers les nouvelles interfaces
 app.get("/client")(lambda: RedirectResponse(url="/client_frontend"))
@@ -1390,6 +1393,11 @@ async def admin_dashboard():
             .panel-box {{ background: #2b2b2b; padding: 10px; border-radius: 4px; border: 1px solid #3d3d3d; }}
             .panel-title {{ font-size: 0.9em; color: #00ff41; font-weight:bold; text-transform: uppercase; margin-bottom: 5px; border-bottom: 1px solid #444; padding-bottom: 3px; }}
             
+            .settings-input {{ width: 100%; background: #16161a; border: 1px solid #444; color: #00f2ff; padding: 8px; border-radius: 4px; margin-bottom: 8px; font-size: 0.8em; }}
+            .mode-toggle {{ display: flex; gap: 5px; margin-bottom: 10px; }}
+            .mode-btn {{ flex: 1; padding: 5px; font-size: 0.7em; border: 1px solid #444; background: #222; color: #888; cursor: pointer; }}
+            .mode-btn.active {{ background: #00f2ff; color: #000; border-color: #00f2ff; font-weight: bold; }}
+
             .qr-side {{ background: white; padding: 10px; border-radius: 4px; text-align: center; margin-top: 10px; }}
             /* Liste des scènes (Caméras) en bas */
             .scenes-container {{ height: 140px; background: #1a1a1a; display: flex; gap: 15px; padding: 15px; overflow-x: auto; border-top: 1px solid #444; align-items: center; }}
@@ -1434,6 +1442,19 @@ async def admin_dashboard():
                 </div>
 
                 <div class="panel-box">
+                    <div class="panel-title">⚙️ PAYDUNYA CONFIG</div>
+                    <div class="mode-toggle">
+                        <button id="mode-test" class="mode-btn active" onclick="setPayMode('test')">SANDBOX</button>
+                        <button id="mode-live" class="mode-btn" onclick="setPayMode('live')">LIVE</button>
+                    </div>
+                    <input type="password" id="pd-master" class="settings-input" placeholder="Master Key">
+                    <input type="password" id="pd-private" class="settings-input" placeholder="Private Key">
+                    <input type="password" id="pd-token" class="settings-input" placeholder="Token">
+                    <button onclick="savePaySettings()" class="fs-btn" style="width:100%; margin-bottom:5px;">💾 ENREGISTRER CLÉS</button>
+                    <button onclick="triggerSetup()" class="fs-btn" style="width:100%; border-color: #ff9900; color: #ff9900;">⚡ INITIALISER DB (SETUP)</button>
+                </div>
+
+                <div class="panel-box">
                     <div class="panel-title">💾 GESTION DATA</div>
                     <a href="/api/export_transactions" class="fs-btn" style="text-decoration:none; background:#ff9900; color:black; display:block; text-align:center; margin-bottom:10px; font-weight:bold;">📥 EXPORTER CSV (Daily)</a>
                     <button onclick="triggerCleaning()" style="width:100%; padding:8px; background:#444; color:#fff; border:none; cursor:pointer;">🧹 CLEAR TRACKING</button>
@@ -1459,6 +1480,56 @@ async def admin_dashboard():
         </div>
         
         <script>
+            const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxGjUmpz3yBSJpfZ9fvZsg8zIxsqSS8jRWEIA04uX3_5dWdmyAnqExj18RqtMPhyRupxA/exec";
+            let currentPayMode = 'test';
+
+            // Charger les paramètres au démarrage
+            async function loadSettings() {{
+                try {{
+                    const res = await fetch(APPS_SCRIPT_URL, {{
+                        method: 'POST',
+                        body: JSON.stringify({{ action: 'getSettings' }})
+                    }});
+                    const data = await res.json();
+                    if(data.success) {{
+                        document.getElementById('pd-master').value = data.settings.masterKey;
+                        document.getElementById('pd-private').value = data.settings.privateKey;
+                        document.getElementById('pd-token').value = data.settings.token;
+                        setPayMode(data.settings.mode);
+                    }}
+                }} catch(e) {{ console.error("Erreur chargement settings"); }}
+            }}
+
+            function setPayMode(mode) {{
+                currentPayMode = mode;
+                document.getElementById('mode-test').className = mode === 'test' ? 'mode-btn active' : 'mode-btn';
+                document.getElementById('mode-live').className = mode === 'live' ? 'mode-btn active' : 'mode-btn';
+            }}
+
+            async function savePaySettings() {{
+                const payload = {{
+                    action: 'saveSettings',
+                    payload: {{
+                        masterKey: document.getElementById('pd-master').value,
+                        privateKey: document.getElementById('pd-private').value,
+                        token: document.getElementById('pd-token').value,
+                        mode: currentPayMode
+                    }}
+                }};
+                try {{
+                    await fetch(APPS_SCRIPT_URL, {{ method: 'POST', body: JSON.stringify(payload) }});
+                    alert("✅ Paramètres PayDunya mis à jour sur Google Apps Script !");
+                }} catch(e) {{ alert("❌ Erreur de sauvegarde"); }}
+            }}
+
+            async function triggerSetup() {{
+                if(confirm("Initialiser la base de données Google Sheets ?")) {{
+                    window.open(APPS_SCRIPT_URL.replace('/exec', '') + '/exec', '_blank');
+                }}
+            }}
+
+            window.onload = loadSettings;
+
             // Nouvelle fonction pour assigner manuellement sans photo
             async function assignUserToCamera() {{
                 const name = document.getElementById('reg-name').value;
@@ -2261,8 +2332,6 @@ async def rfid_login(rfid_id: str = Form(...)):
     except Exception as e:
         print(f"Erreur RFID Login: {e}")
         return {"status": "error", "authorized": False, "message": "Erreur serveur"}
-    try:
-        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=5) # Ajout d'un timeout
-        resp.raise_for_status() # Lève une exception pour les codes 4xx/5
 
+if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, ssl_keyfile="key.pem", ssl_certfile="cert.pem")

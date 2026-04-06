@@ -190,10 +190,18 @@ let currentUser;
 let faceStream = null;
 // Au chargement de la page, on vérifie si un utilisateur est déjà connecté
 window.addEventListener('DOMContentLoaded', () => {
-    const savedUser = localStorage.getItem('jeldem_session');
-    if (savedUser) {
-        currentUser = JSON.parse(savedUser);
-        showDashboard();
+    const urlParams = new URLSearchParams(window.location.search);
+    const viewProfile = urlParams.get('view_profile');
+    
+    if (viewProfile) {
+        // Si on scanne le QR code d'un ami ou son propre profil
+        loadPublicProfile(viewProfile);
+    } else {
+        const savedUser = localStorage.getItem('jeldem_session');
+        if (savedUser) {
+            currentUser = JSON.parse(savedUser);
+            showDashboard();
+        }
     }
 });
 
@@ -237,8 +245,11 @@ async function login() {
             payload: { phone: phone, password: pass }
         };
 
-        // Note: Google Apps Script nécessite souvent redirect: 'follow'
-        const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload), redirect: 'follow' });
+        // Envoi en mode 'no-cors' ou simple texte pour éviter le blocage CORS Google
+        const res = await fetch(API_URL, { 
+            method: 'POST', 
+            body: JSON.stringify(payload)
+        });
         const data = await res.json();
         
         if(data.success) {
@@ -318,19 +329,29 @@ async function updatePassword() {
 }
 
 async function recharge(amount) {
+    if(!confirm(`Confirmer le dépôt de ${amount} FCFA via Wave (PayDunya) ?`)) return;
+    
     const payload = {
-        action: "rechargeBalance",
-        payload: { phone: currentUser.phone, amount: amount }
+        action: "initiatePayDunya",
+        payload: { phone: currentUser.phone, amount: amount, provider: 'wave' }
     };
     
-    const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload), redirect: 'follow' });
+    const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
     const data = await res.json();
 
     if(data.success) {
-        alert(`+${amount} FCFA crédités sur JEL DEM`);
+        alert(`✅ Succès PayDunya : +${amount} FCFA crédités sur votre compte JEL DEM`);
         currentUser.balance = data.newBalance;
         localStorage.setItem('jeldem_session', JSON.stringify(currentUser));
         renderBalanceOnly();
+    }
+}
+
+async function loadPublicProfile(phone) {
+    const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify({action: 'getUserProfile', payload: {phone}})});
+    const data = await res.json();
+    if(data.success) {
+        alert(`Profil Scanné : ${data.user.name}\nSolde : ${data.user.balance} FCFA\nFace ID : ${data.user.face_active}`);
     }
 }
 
