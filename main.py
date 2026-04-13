@@ -86,7 +86,7 @@ try:
     FACE_REC_AVAILABLE = True
 except ImportError:
     FACE_REC_AVAILABLE = False
-    print("⚠️ Mode 'Sans Reco Faciale' actif (Module non installé). Utilisez l'assignation manuelle dans l'Admin.")
+    print("Mode 'Sans Reco Faciale' actif (Module non installe). Utilisez l'assignation manuelle dans l'Admin.")
 
 NGROK_URL = None
 
@@ -165,10 +165,10 @@ try:
 
     # Force le modèle sur GPU si disponible pour la "bonne puissance"
     MODEL.to('cuda') if hasattr(MODEL, 'to') else print("Running on CPU")
-    print(f"✅ IA prête. Mode: {'GPU (Puissance Max)' if 'cuda' in str(MODEL.device) else 'CPU (Mode lent)'}")
+    print(f"IA prete. Mode: {'GPU (Puissance Max)' if 'cuda' in str(MODEL.device) else 'CPU (Mode lent)'}")
 except Exception as e:
     MODEL = None
-    print(f"❌ Erreur chargement YOLO: {e}")
+    print(f"Erreur chargement YOLO: {e}")
 
 # --- CONFIGURATION MEDIAPIPE (MAINS) ---
 try:
@@ -180,15 +180,15 @@ try:
     # On initialise le détecteur de corps entier (Pose) pour voir toutes les parties du corps
     POSE_DETECTOR = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5, model_complexity=0)
 except AttributeError:
-    print("\n❌ ERREUR CRITIQUE : Vous avez probablement un fichier nommé 'mediapipe.py' dans votre dossier !")
-    print("👉 Renommez-le (ex: 'test.py') et relancez. Python essaie de l'importer à la place de la librairie.\n")
+    print("\nERREUR CRITIQUE : Vous avez probablement un fichier nomme 'mediapipe.py' dans votre dossier !")
+    print("Renommez-le (ex: 'test.py') et relancez. Python essaie de l'importer a la place de la librairie.\n")
     HAND_DETECTOR = None
     POSE_DETECTOR = None
     mp_hands = None
     mp_pose = None
     mp_drawing = None
 except Exception as e:
-    print(f"⚠️ MediaPipe non chargé : {e}")
+    print(f"MediaPipe non charge : {e}")
     HAND_DETECTOR = None
     POSE_DETECTOR = None
     mp_hands = None
@@ -641,15 +641,11 @@ async def export_transactions():
 
 @app.get("/client_frontend", response_class=HTMLResponse)
 async def client_frontend_interface():
-    """Sert l'interface client moderne (frontend/client.html)."""
-    with open("frontend/client.html", "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
+    return RedirectResponse(url="/client")
 
 @app.get("/manager_frontend", response_class=HTMLResponse)
 async def manager_frontend_interface():
-    """Sert l'interface manager moderne (frontend/manager.html)."""
-    with open("frontend/manager.html", "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
+    return await manager_dashboard()
 
 @app.get("/api/client_data/{user_id}")
 async def get_client_data(user_id: str):
@@ -1565,6 +1561,7 @@ async def admin_dashboard():
                             <div class="panel-title" style="font-size:0.8em; color:#aaa; text-align:center;">COMPTEUR VISAGES</div>
                             <div id="big-counter" style="font-size: 3.5em; color: #00f2ff; text-align: center; font-weight: bold; margin: 10px 0;">0</div>
                             <button onclick="triggerCleaning()" style="width:100%; padding:10px; background:#222; color:#fff; border:1px solid #444; border-radius:4px; cursor:pointer; font-weight:bold; text-transform:uppercase; transition:0.2s;">MODE NETTOYAGE</button>
+                            <button onclick="location.href='/register_product'" style="width:100%; padding:10px; background:#00f2ff; color:#000; border:none; border-radius:4px; cursor:pointer; font-weight:bold; text-transform:uppercase; margin-top:5px;">MODE TRAINING</button>
                         </div>
 
                         Système actif.<br>
