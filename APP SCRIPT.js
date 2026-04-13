@@ -3,9 +3,9 @@
 // --- MENU PERSONNALISÉ ---
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
-  ui.createMenu('🛡️ HYFLEX ADMIN')
-    .addItem('⚙️ Initialiser les Feuilles', 'setupDatabase')
-    .addItem('🔄 Synchroniser la Config PayDunya', 'syncConfigFromSheet')
+  ui.createMenu('HYFLEX ADMIN')
+    .addItem('Initialiser les Feuilles', 'setupDatabase')
+    .addItem('Synchroniser la Config PayDunya', 'syncConfigFromSheet')
     .addToUi();
 }
 
@@ -42,7 +42,7 @@ function syncConfigFromSheet() {
   const ss = getDb();
   const sheet = ss.getSheetByName('Configuration');
   if (!sheet) {
-    SpreadsheetApp.getUi().alert('❌ Erreur : Onglet "Configuration" introuvable. Lancez d\'abord l\'initialisation.');
+    SpreadsheetApp.getUi().alert('Erreur : Onglet "Configuration" introuvable. Lancez d\'abord l\'initialisation.');
     return;
   }
   
@@ -53,7 +53,7 @@ function syncConfigFromSheet() {
   for (let i = 1; i < data.length; i++) {
     if (data[i][0]) props.setProperty(data[i][0], data[i][1].toString());
   }
-  SpreadsheetApp.getUi().alert('✅ Configuration PayDunya synchronisée avec succès !');
+  SpreadsheetApp.getUi().alert('Configuration PayDunya synchronisee avec succes !');
 }
 
 // Force la détection des autorisations Drive : DriveApp.getFoldersByName
@@ -124,6 +124,19 @@ function doPost(e) {
         }
       }
       result = products;
+
+    } else if (action === 'getUsers') {
+      const sheet = ss.getSheetByName("Utilisateurs");
+      if (!sheet) { setupDatabase(); return ContentService.createTextOutput(JSON.stringify([])).setMimeType(ContentService.MimeType.JSON); }
+      
+      const rows = sheet.getDataRange().getValues();
+      let users = [];
+      for (let i = 1; i < rows.length; i++) {
+        if (rows[i][1]) {
+          users.push({ name: rows[i][1], phone: rows[i][3], balance: rows[i][4], rfid: rows[i][7] });
+        }
+      }
+      result = users;
 
     } else if (action === 'requestDoorAccess') {
       // RELAIS VERS LE SERVEUR PYTHON (FastAPI)
@@ -335,6 +348,22 @@ function doPost(e) {
        }
        result = { success: true };
 
+    } else if (action === 'updatePythonUrl') {
+       // Met à jour uniquement l'URL du serveur Python (utile pour Ngrok automatique)
+       props.setProperty('PYTHON_SERVER_URL', data.payload.pythonUrl);
+       
+       let sheet = ss.getSheetByName('Configuration');
+       if (sheet) {
+         const configData = sheet.getDataRange().getValues();
+         for (let i = 1; i < configData.length; i++) {
+           if (configData[i][0] === 'PYTHON_SERVER_URL') {
+             sheet.getRange(i + 1, 2).setValue(data.payload.pythonUrl);
+             break;
+           }
+         }
+       }
+       result = { success: true, message: "URL Python mise à jour" };
+
     } else if (action === 'getSettings') {
        // Récupère les paramètres actuels
        result = { 
@@ -541,7 +570,7 @@ function sendStyledEmail(to, subject, title, message) {
 function doGet(e) {
   // Lancez l'URL du script dans le navigateur une fois pour initialiser
   setupDatabase();
-  return HtmlService.createHtmlOutput("<h1>✅ Système HYFLEX Initialisé</h1><p>Les onglets ont été créés dans votre Google Sheet.</p>");
+  return HtmlService.createHtmlOutput("<h1>Systeme HYFLEX Initialise</h1><p>Les onglets ont ete crees dans votre Google Sheet.</p>");
 }
 
 /**
