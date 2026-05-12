@@ -71,9 +71,9 @@ function setupDatabase() {
   
   // En-têtes pour chaque feuille
   const headers = {
-    'Utilisateurs': ['ID_Utilisateur', 'Nom', 'Email', 'Telephone', 'Solde_FCFA', 'Date_Inscription', 'Mot_de_Passe', 'RFID_ID', 'Face_ID_Active'],
-    'Produits': ['ID_Produit', 'Nom_Produit', 'Prix_FCFA', 'Stock_Actuel', 'Rayon'],
-    'Transactions': ['ID_Transaction', 'Date_Heure', 'ID_Utilisateur', 'Nom_Client', 'ID_Produit', 'Nom_Produit', 'Montant_FCFA', 'Camera_ID'],
+    'Utilisateurs': ['ID_Utilisateur', 'Nom', 'Email', 'Telephone', 'Solde_FCFA', 'Date_Inscription', 'Mot_de_Passe', 'RFID_ID', 'Face_ID_Active', 'Type_Compte', 'Infos_Bio'],
+    'Produits': ['ID_Produit', 'Nom_Produit', 'Prix_FCFA', 'Code_Barre', 'Stock_Actuel', 'Rayon'],
+    'Transactions': ['ID_Transaction', 'Date_Heure', 'ID_Utilisateur', 'Nom_Client', 'Action', 'Details', 'Montant_FCFA', 'Camera_ID'],
     'Configuration': ['Clé de Paramètre', 'Valeur']
   };
 
@@ -139,35 +139,44 @@ function doPost(e) {
       result = users;
 
     } else if (action === 'requestDoorAccess') {
-      // RELAIS VERS LE SERVEUR PYTHON (FastAPI)
-      const config = getPayDunyaConfig();
-      const pythonServerUrl = config.pythonUrl + "/api/rfid_login"; 
+      const rfidId = data.data.rfidId;
+      const userSheet = ss.getSheetByName("Utilisateurs");
+      const uData = userSheet.getDataRange().getValues();
+      let foundUser = null;
       
-      const forwardPayload = {
-        uid: data.data.rfidId
-      };
+      // Recherche de l'utilisateur par l'UID du badge (colonne 8 : RFID_ID)
+      for (let i = 1; i < uData.length; i++) {
+        if (uData[i][7].toString() === rfidId.toString()) {
+          foundUser = {
+            id: uData[i][0],
+            name: uData[i][1],
+            phone: uData[i][3],
+            balance: uData[i][4]
+          };
+          break;
+        }
+      }
 
-      const options = {
-        method: 'post',
-        contentType: 'application/json',
-        payload: JSON.stringify(forwardPayload),
-        muteHttpExceptions: true
-      };
-
-      try {
-        const response = UrlFetchApp.fetch(pythonServerUrl, options);
-        const serverResponse = JSON.parse(response.getContentText());
+      if (foundUser) {
+        // 1. ÉCRITURE DU LOG POUR LE DASHBOARD (index.html)
+        let transSheet = ss.getSheetByName("Transactions");
+        if (!transSheet) { setupDatabase(); transSheet = ss.getSheetByName("Transactions"); }
         
-        // On reformate la réponse pour que l'ESP32 la comprenne bien
+        const logId = "ACCES_" + new Date().getTime();
+        // On enregistre : ID, Date, Téléphone (pour la photo), Nom, Action, Détails, Montant, Caméra
+        transSheet.appendRow([
+          logId, new Date(), foundUser.phone, foundUser.name, "ACCÈS PORTÉ", "Entrée RFID : " + rfidId, 0, "PORTIQUE"
+        ]);
+
         result = {
-          authorized: serverResponse.authorized || false,
+          authorized: true,
           user_data: {
-            name: serverResponse.user || "Utilisateur",
-            balance: serverResponse.balance || 0
+            name: foundUser.name,
+            balance: foundUser.balance
           }
         };
-      } catch (e) {
-        result = { authorized: false, message: "Erreur liaison Python: " + e.toString() };
+      } else {
+      result = { authorized: false, message: "Accès refusé ou badge inconnu." };
       }
 
     } else if (action === 'addProduct') {
@@ -179,6 +188,7 @@ function doPost(e) {
         newId,
         data.payload.name,
         data.payload.price,
+        data.payload.barcode || "",
         data.payload.stock || 100,
         data.payload.shelf || "Rayon A"
       ]);
@@ -195,15 +205,20 @@ function doPost(e) {
        const phone = data.payload.phone || "";
        const password = data.payload.password || "1234";
        const rfid = data.payload.rfid || "";
+       const userType = data.payload.userType || "Client";
+       const personalInfo = data.payload.personalInfo || "";
        
-       sheet.appendRow([newId, data.payload.name, email, phone, solde, new Date(), password, rfid, "NON"]);
+       sheet.appendRow([newId, data.payload.name, email, phone, solde, new Date(), password, rfid, "NON", userType, personalInfo]);
        
        // ENVOI D'EMAIL DE BIENVENUE
        if (email !== "Non renseigné") {
          sendStyledEmail(
            email, 
-           "Bienvenue chez JEL DEM !", 
-           "Félicitations, votre compte est prêt !", 
+           "Confirmation d'Inscription - JEL DEM", 
+           `Bienvenue parmi nous, ${data.payload.name} !`, 
+           `Votre compte <b>${userType}</b> a été créé avec succès.<br><br>` +
+           `<b>Détails de votre profil :</b><br>` +
+           `- Statut : ${userType}<br>` +
            `Bonjour <b>${data.payload.name}</b>,<br><br>` +
            `Votre compte JEL DEM a été créé avec succès. Vous faites maintenant partie de l'avenir du shopping connecté.<br><br>` +
            `Vous pouvez dès à présent utiliser votre <b>QR Code</b> ou votre <b>badge RFID</b> pour effectuer vos achats en toute liberté.`
@@ -290,10 +305,19 @@ function doPost(e) {
                phone: rows[i][3].toString(), 
                face_id: rows[i][8], 
                email: rows[i][2],
+               userType: rows[i][9], // Récupère le rôle (Manager, Étudiant, etc.)
                photo_url: "https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=" + rows[i][3],
                transactions: transactions
              } 
            };
+           
+           // LOG DE L'ENTRÉE POUR LE DASHBOARD
+           if (transSheet) {
+             const logId = "ENTREE_" + new Date().getTime();
+             transSheet.appendRow([
+               logId, new Date(), rows[i][3], rows[i][1], "ACCÈS PORTÉ", "Entrée Magasin", 0, "PORTIQUE"
+             ]);
+           }
            break;
          }
        }
@@ -304,9 +328,12 @@ function doPost(e) {
        if (!sheet) { setupDatabase(); sheet = ss.getSheetByName("Transactions"); }
        
        const newId = "TRANS_" + new Date().getTime();
+       // On récupère les données envoyées par Python
+       const p = data.payload;
+       
        sheet.appendRow([
-         newId, new Date(), data.payload.userId, data.payload.userName, 
-         data.payload.productId, data.payload.productName, data.payload.price, data.payload.cameraId
+         newId, new Date(), p.userID, p.userName || p.userID, 
+         p.action || "achat", p.produit || "Inconnu", p.montant || 0, p.camera || "CAM"
        ]);
        
        // ENVOI D'EMAIL AUTOMATIQUE
@@ -371,6 +398,23 @@ function doPost(e) {
          settings: getPayDunyaConfig() || {}
        };
 
+    } else if (action === 'testPayDunya') {
+      // Fonction de test de connectivité
+      const config = getPayDunyaConfig();
+      const baseUrl = config.mode === "live" 
+        ? "https://paydunya.com/api/v1/checkout-invoice/confirm/test" 
+        : "https://paydunya.com/sandbox-api/v1/checkout-invoice/confirm/test";
+      
+      try {
+        const response = UrlFetchApp.fetch(baseUrl, {
+          "headers": { "PAYDUNYA-MASTER-KEY": config.masterKey, "PAYDUNYA-TOKEN": config.token },
+          "muteHttpExceptions": true
+        });
+        result = { success: true, code: response.getResponseCode(), body: response.getContentText() };
+      } catch (e) {
+        result = { success: false, error: e.toString() };
+      }
+
     } else if (action === 'getUserProfile') {
        // Utilisé par le scan QR Code pour afficher les infos
        let sheet = ss.getSheetByName("Utilisateurs");
@@ -416,17 +460,13 @@ function doPost(e) {
       const payloadPayDunya = {
         "invoice": {
           "total_amount": amount,
-          "description": "Recharge Wallet JEL DEM"
+          "description": "Recharge Compte DALL JAMM - Client: " + phone
         },
         "store": {
-          "name": "JEL DEM SHOP"
+          "name": "DALL JAMM SHOP & GO"
         },
         "custom_data": {
           "phone": phone
-        },
-        "actions": {
-          "cancel_url": "https://jeldem.abmcy.com/",
-          "return_url": "https://jeldem.abmcy.com/"
         }
       };
 
@@ -603,4 +643,50 @@ function verifyPayDunyaTransaction(token) {
     console.error("Erreur parsing PayDunya: " + content);
     return { response_code: "99", response_text: "Réponse PayDunya invalide" };
   }
+}
+// --- DASHBOARD LIVE ---//
+function doGet() {
+  return HtmlService.createTemplateFromFile('index').evaluate().addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+function getLastLog() {
+  const ss = getDb();
+  const transSheet = ss.getSheetByName("Transactions");
+  const userSheet = ss.getSheetByName("Utilisateurs");
+  const lastRow = transSheet.getLastRow();
+  if (lastRow <= 1) return { name: "VEILLE", status: "ATTENTE", time: "--:--", photo: "", balance: 0 };
+  const log = transSheet.getRange(lastRow, 1, 1, 8).getValues()[0];
+  const phone = log[2].toString();
+  let balance = 0;
+  const users = userSheet.getDataRange().getValues();
+  for (let i = 1; i < users.length; i++) { if (users[i][3].toString() === phone) { balance = users[i][4]; break; } }
+  let photoUrl = "";
+  const folders = DriveApp.getFoldersByName("HYFLEX_DATASET");
+  if (folders.hasNext()) {
+    const files = folders.next().getFilesByName("FACE_" + phone + ".jpg");
+    if (files.hasNext()) photoUrl = files.next().getDownloadUrl();
+  }
+  // log[3] = Nom, log[4] = Action (Status)
+  return { name: log[3], status: log[4], time: Utilities.formatDate(new Date(log[1]), "GMT+0", "HH:mm:ss"), photo: photoUrl, balance: balance, phone: phone };
+}
+
+/**
+ * Récupère les 15 dernières transactions pour le tableau défilant
+ */
+function getRecentLogs() {
+  const ss = getDb();
+  const sheet = ss.getSheetByName("Transactions");
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return [];
+  
+  const startRow = Math.max(2, lastRow - 14);
+  const numRows = lastRow - startRow + 1;
+  const data = sheet.getRange(startRow, 1, numRows, 8).getValues();
+  
+  return data.reverse().map(row => ({
+    time: Utilities.formatDate(new Date(row[1]), "GMT+0", "HH:mm:ss"),
+    name: row[3],
+    status: row[4], // Index 4 correspond à la colonne 'Action' (Statut)
+    amount: row[6]
+  }));
 }

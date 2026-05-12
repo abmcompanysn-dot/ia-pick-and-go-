@@ -10,6 +10,7 @@ import mediapipe as mp # Pour la détection des mains
 import numpy as np
 import requests # Nouvelle importation
 import time
+import supervision as sv
 from fastapi.middleware.cors import CORSMiddleware
 import socket
 import asyncio
@@ -17,11 +18,6 @@ try:
     import qrcode
 except ImportError:
     qrcode = None
-try:
-    from pyngrok import ngrok
-    PYNGROK_AVAILABLE = True
-except ImportError:
-    PYNGROK_AVAILABLE = False
 import pickle # Pour sauvegarder l'index sur le disque
 import threading # Pour le multitâche fluide
 from concurrent.futures import ThreadPoolExecutor
@@ -65,6 +61,9 @@ DB_PRODUITS = {}
 # Permet à l'admin de dire "C'est Thomas devant la caméra 1"
 CAMERA_USER_ASSIGNMENTS = {} 
 
+ # --- GESTION DES SESSIONS RFID ACTIVES ---
+ACTIVE_SESSIONS = {} # {cam_id: {"user": "Nom", "start_time": ts}}
+
 # --- GESTION WALLET (PORTEFEUILLE) ---
 WALLET_FILE = "wallets.json"
 
@@ -88,42 +87,16 @@ except ImportError:
     FACE_REC_AVAILABLE = False
     print("⚠️ Mode 'Sans Reco Faciale' actif (Module non installé). Utilisez l'assignation manuelle dans l'Admin.")
 
-NGROK_URL = None
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global NGROK_URL
-    # Démarrage automatique de Ngrok si le jeton est présent
-    auth_token = os.getenv("NGROK_AUTH_TOKEN")
-    if PYNGROK_AVAILABLE and auth_token:
-        try:
-            ngrok.set_auth_token(auth_token)
-            # On crée un tunnel vers notre serveur HTTPS local (port 8000)
-            # Ngrok gère la redirection sécurisée vers votre localhost
-            tunnel = ngrok.connect(8000, bind_tls=True)
-            NGROK_URL = tunnel.public_url
-            print(f"\n" + "═"*60)
-            print(f"🌍 URL PUBLIQUE NGROK : {NGROK_URL}")
-            print(f"📱 Accès mobile : {NGROK_URL}/mobile")
-            print("═"*60 + "\n")
-            
-            # Synchronisation automatique de l'URL avec Google Sheets
-            def sync_ngrok_url():
-                try:
-                    requests.post(APPS_SCRIPT_URL, json={
-                        "action": "updatePythonUrl",
-                        "payload": {"pythonUrl": NGROK_URL}
-                    }, timeout=5)
-                    print("✅ URL Ngrok synchronisée avec Google Sheets.")
-                except: pass
-            threading.Thread(target=sync_ngrok_url, daemon=True).start()
-        except Exception as e:
-            print(f"⚠️ Erreur Ngrok : {e}")
-
-    # Lance la boucle d'analyse IA en arrière-plan
+    # Lance la fonction background_analysis_loop dans un autre fil d'exécution au démarrage
     t = threading.Thread(target=background_analysis_loop, daemon=True)
     t.start()
     yield
+
+# --- CONFIGURATION SUPERVISION (PRO HUD) ---
+BOX_ANNOTATOR = sv.BoxAnnotator(thickness=2)
+LABEL_ANNOTATOR = sv.LabelAnnotator(text_thickness=2, text_scale=1.0)
 
 # --- INITIALISATION UNIQUE DE L'APPLICATION ---
 app = FastAPI(lifespan=lifespan)
@@ -157,15 +130,15 @@ app.add_middleware(
 # --- CHARGEMENT DU MODÈLE YOLO (Le Cerveau) ---
 try:
     # Tente de charger votre modèle entraîné, sinon prend le modèle standard
-    # On essaie d'utiliser CUDA (GPU) pour une puissance maximale
     if os.path.exists("best.pt"):
         MODEL = YOLO("best.pt")
+        MODEL.to('cpu') # Force l'utilisation du processeur
+        print(f"✅ Modèle 'best.pt' chargé. Classes détectables : {MODEL.names}")
     else:
-        MODEL = YOLO("yolov8n.pt") # Modèle léger par défaut
-
-    # Force le modèle sur GPU si disponible pour la "bonne puissance"
-    MODEL.to('cuda') if hasattr(MODEL, 'to') else print("Running on CPU")
-    print(f"✅ IA prête. Mode: {'GPU (Puissance Max)' if 'cuda' in str(MODEL.device) else 'CPU (Mode lent)'}")
+        MODEL = YOLO("yolov8n.pt")
+        MODEL.to('cpu')
+        print("⚠️ 'best.pt' introuvable. Utilisation de YOLOv8 Nano.")
+        print("💡 Pour reconnaître vos produits (Coca, etc.), lancez 'python train_model.py' après avoir préparé vos données.")
 except Exception as e:
     MODEL = None
     print(f"❌ Erreur chargement YOLO: {e}")
@@ -177,8 +150,8 @@ try:
     mp_drawing = mp.solutions.drawing_utils
     # On initialise le détecteur de mains (Mode léger pour la vitesse)
     HAND_DETECTOR = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.3)
-    # On initialise le détecteur de corps entier (Pose) pour voir toutes les parties du corps
-    POSE_DETECTOR = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5, model_complexity=0)
+    # On initialise le détecteur de corps (Pose) pour le suivi du squelette
+    POSE_DETECTOR = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5, min_tracking_confidence=0.5)
 except AttributeError:
     print("\n❌ ERREUR CRITIQUE : Vous avez probablement un fichier nommé 'mediapipe.py' dans votre dossier !")
     print("👉 Renommez-le (ex: 'test.py') et relancez. Python essaie de l'importer à la place de la librairie.\n")
@@ -219,7 +192,9 @@ LAST_DETECTIONS = {} # Pour garder les rectangles en mémoire entre deux analyse
 # On y stocke aussi maintenant le "vrai nom" identifié par matching visuel
 SHELF_STATE = {}
 
-GESTURE_PATHS = {} # {camera_id: {track_id: [(x, y), ...]}}
+# --- MÉMOIRE DES SCANS EN ATTENTE (Pour paiement RFID) ---
+# { "cam_id": { "product": "coca", "price": 500, "timestamp": ... } }
+PENDING_SCANS = {}
 
 # --- MÉMOIRE DE TRACKING INDIVIDUEL ---
 # Associe un track_id YOLO (personne) à un nom identifié
@@ -287,7 +262,7 @@ PRODUCT_FLANN_MATCHER = None # Le moteur de recherche rapide
 KNOWN_PRODUCT_NAMES_LIST = [] # Liste alignée avec l'index FLANN pour retrouver les noms
 
 # Initialisation du détecteur de points d'intérêt (Rapide et Efficace)
-ORB = cv2.ORB_create(nfeatures=1000) # Réduit pour gagner en fluidité sans perdre trop de précision
+ORB = cv2.ORB_create(nfeatures=3000) # Augmenté encore pour capter les moindres détails
 
 def load_known_products(force_reload=False):
     """Apprend les produits enregistrés dans le dossier dataset sans entraînement."""
@@ -590,7 +565,7 @@ def draw_overlays(image_bytes, text_lines):
         # 1. En-tête type CCTV (Bande noire en haut)
         draw.rectangle([(0, 0), (img.width, 30)], fill=(0, 0, 0, 255))
         timestamp = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        draw.text((10, 8), f"REC  {timestamp}", font=font, fill="#FF0000")
+        draw.text((10, 8), f"● REC  {timestamp}", font=font, fill="#FF0000")
 
         # Fond sombre semi-transparent en haut à gauche pour le texte
         # On le descend un peu pour ne pas cacher l'en-tête CCTV
@@ -621,6 +596,11 @@ async def root():
         with open("index.html", "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
     return RedirectResponse(url="/admin")
+
+@app.get("/config.js")
+async def get_config_js():
+    """Sert le fichier de configuration JS pour le frontend."""
+    return FileResponse("config.js")
 
 @app.get("/api/export_transactions")
 async def export_transactions():
@@ -698,6 +678,53 @@ async def api_login(phone: str = Form(...), password: str = Form(...)):
     except Exception as e:
         print(f"Erreur login server: {e}")
         raise HTTPException(status_code=500, detail="Erreur de communication avec la base de données")
+
+@app.get("/api/test_paydunya")
+async def test_paydunya_route():
+    """Teste la connexion avec l'API PayDunya."""
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json={"action": "testPayDunya"}, timeout=10)
+        return resp.json()
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/scan_and_pay")
+async def scan_and_pay(
+    phone: str = Form(...), 
+    product_code: str = Form(...), 
+    user_name: str = Form(...), 
+    user_email: str = Form(...)
+):
+    """Débite l'utilisateur immédiatement après un scan manuel (QR/Barcode)."""
+    product_name = product_code.lower().strip()
+    # Récupération du prix depuis la base synchronisée Google
+    price = DB_PRODUITS.get(product_name, 0)
+    
+    if price == 0:
+        raise HTTPException(status_code=404, detail=f"Produit '{product_code}' non répertorié")
+
+    # 1. Débit immédiat du portefeuille local
+    if phone in WALLETS:
+        if WALLETS[phone] < price:
+            raise HTTPException(status_code=400, detail="Solde insuffisant pour cet achat")
+        WALLETS[phone] -= int(price)
+        save_wallets()
+
+    # 2. Synchronisation Cloud (Log Sheets + Envoi Email automatique via Apps Script)
+    payload = {
+        "userID": phone,
+        "userName": user_name,
+        "userEmail": user_email,
+        "produit": product_name,
+        "productName": product_name.capitalize(),
+        "montant": price,
+        "price": price,
+        "action": "ACHAT_NO_CAMERA",
+        "camera": "MOBILE_SCAN"
+    }
+    threading.Thread(target=log_transaction_via_api, args=(payload,), daemon=True).start()
+    
+    return {"status": "success", "new_balance": WALLETS.get(phone, 0)}
 
 
 @app.post("/api/update_password")
@@ -1047,25 +1074,23 @@ def identify_person_in_image(image_input):
 
 def log_transaction_via_api(payload):
     """Enregistre la transaction en appelant l'API Google Apps Script."""
-    for attempt in range(3): # Tentative de reconnexion auto (3 essais)
-        try:
-            api_payload = {
-                "action": "logTransaction",
-                "payload": payload
-            }
-            save_transaction_local(payload) 
-            response = requests.post(APPS_SCRIPT_URL, json=api_payload, timeout=12)
-            response.raise_for_status() 
-            print(f"✅ Transaction enregistrée sur Google Sheets (Essai {attempt+1}): {response.json()}")
-            return 
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                 print(f"🚨 ERREUR PERMISSION (401): Google refuse l'accès.")
-                 break
-            print(f"⚠️ Erreur HTTP (Essai {attempt+1}): {e}")
-        except Exception as e:
-            print(f"⚠️ Erreur Réseau/Google (Essai {attempt+1}): {e}")
-        time.sleep(2)
+    try:
+        api_payload = {
+            "action": "logTransaction",
+            "payload": payload
+        }
+        save_transaction_local(payload) # Sauvegarde locale pour l'export CSV
+        response = requests.post(APPS_SCRIPT_URL, json=api_payload)
+        response.raise_for_status() # Lève une erreur si le statut n'est pas 200
+        print(f"✅ Transaction enregistrée sur Google Sheets: {response.json()}")
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+             print(f"🚨 ERREUR PERMISSION (401): Google refuse l'accès.")
+             print(f"👉 SOLUTION: Dans Apps Script > Déployer > 'Qui a accès' doit être 'Anyone' (Tout le monde).")
+        else:
+             print(f"❌ ERREUR API GOOGLE: {e}")
+    except Exception as e:
+        print(f"❌ ERREUR API GOOGLE: Impossible d'enregistrer la transaction. {e}")
 
 
 def process_pick_and_go_logic(camera_id, img):
@@ -1081,24 +1106,11 @@ def process_pick_and_go_logic(camera_id, img):
     
     detections_to_draw = []
     person_count = 0
-
-    # --- ÉTAPE 1.5 : DÉTECTION DU CORPS ENTIER (MediaPipe Pose) ---
-    pose_landmarks = None
-    if POSE_DETECTOR:
-        pose_results = POSE_DETECTOR.process(img_cv)
-        if pose_results.pose_landmarks:
-            pose_landmarks = pose_results.pose_landmarks
-            detections_to_draw.append({
-                "type": "pose",
-                "landmarks": pose_landmarks
-            })
     
     # --- ÉTAPE 1 : TRACKING YOLO ---
     res = None
     try:
-        # Utilisation de half=True pour doubler la vitesse sur les cartes graphiques modernes
-        results = MODEL.track(img, persist=True, verbose=False, conf=0.6, iou=0.5, 
-                             tracker="botsort.yaml", imgsz=640, half=True)
+        results = MODEL.track(img, persist=True, verbose=False, conf=0.3, iou=0.5, tracker="botsort.yaml")
         res = results[0]
     except Exception:
         return []
@@ -1121,9 +1133,9 @@ def process_pick_and_go_logic(camera_id, img):
                 if camera_id not in PERSON_TRACK_MEMORY: PERSON_TRACK_MEMORY[camera_id] = {}
                 
                 # Optimisation : On ne tente l'identification que 10 fois max ou si pas encore reconnu
-                if tid not in PERSON_TRACK_MEMORY.get(camera_id, {}) or PERSON_TRACK_MEMORY[camera_id][tid] == "Client_Unknown":
+                if tid not in PERSON_TRACK_MEMORY[camera_id] or PERSON_TRACK_MEMORY[camera_id][tid] == "Client_Unknown":
                     attempts = PERSON_ID_ATTEMPTS.get(f"{camera_id}_{tid}", 0)
-                    if attempts < 5: # Réduit à 5 tentatives pour économiser le CPU
+                    if attempts < 10: # On tente sur les 10 premières secondes de visibilité
                         p_crop = img.crop((box[0], box[1], box[2], box[3]))
                         name = identify_person_in_image(p_crop)
                         if name != "Client_Unknown":
@@ -1133,19 +1145,6 @@ def process_pick_and_go_logic(camera_id, img):
                         # Si après 5 essais on ne sait pas, on marque inconnu pour cette session
                         name = "Client_Unknown"
                         PERSON_TRACK_MEMORY[camera_id][tid] = name
-                
-                # --- SUIVI DU GESTE (TRAJECTOIRE) ---
-                if pose_landmarks:
-                    # On cherche le point du poignet le plus visible (15: gauche, 16: droit)
-                    l_wrist = pose_landmarks.landmark[15]
-                    r_wrist = pose_landmarks.landmark[16]
-                    active_lm = l_wrist if l_wrist.visibility > r_wrist.visibility else r_wrist
-                    if active_lm.visibility > 0.5:
-                        px, py = int(active_lm.x * width), int(active_lm.y * height)
-                        if camera_id not in GESTURE_PATHS: GESTURE_PATHS[camera_id] = {}
-                        if tid not in GESTURE_PATHS[camera_id]: GESTURE_PATHS[camera_id][tid] = []
-                        GESTURE_PATHS[camera_id][tid].append((px, py))
-                        if len(GESTURE_PATHS[camera_id][tid]) > 15: GESTURE_PATHS[camera_id][tid].pop(0)
 
     # --- ÉTAPE 3 : DÉTECTION DES MAINS ET LIEN AVEC LES PERSONNES ---
     hand_to_person_track_id = {} # {hand_index: person_track_id}
@@ -1184,6 +1183,25 @@ def process_pick_and_go_logic(camera_id, img):
                         hand_to_person_track_id[len(hand_positions)-1] = p_tid
                         break
 
+    # 2. DÉTECTION DU CORPS ET DU COEUR (Pose Estimation)
+    if POSE_DETECTOR:
+        pose_results = POSE_DETECTOR.process(img_cv)
+        if pose_results.pose_landmarks:
+            detections_to_draw.append({
+                "type": "pose",
+                "landmarks": pose_results.pose_landmarks
+            })
+            
+            # Calcul de la position du "coeur" (entre les deux épaules)
+            lms = pose_results.pose_landmarks.landmark
+            l_shoulder = lms[mp_pose.PoseLandmark.LEFT_SHOULDER]
+            r_shoulder = lms[mp_pose.PoseLandmark.RIGHT_SHOULDER]
+            
+            if l_shoulder.visibility > 0.5 and r_shoulder.visibility > 0.5:
+                heart_x = int(((l_shoulder.x + r_shoulder.x) / 2) * width)
+                heart_y = int(((l_shoulder.y + r_shoulder.y) / 2) * height)
+                detections_to_draw.append({"type": "heart", "pos": (heart_x, heart_y)})
+
     # --- ÉTAPE 4 : LOGIQUE PRODUITS ET INTERACTIONS ---
     if camera_id not in SHELF_STATE: SHELF_STATE[camera_id] = {}
     
@@ -1213,24 +1231,27 @@ def process_pick_and_go_logic(camera_id, img):
                 SHELF_STATE[camera_id][track_id] = {
                 "class": name,
                 "missing_frames": 0,
-                "last_seen": time.time(),
-                "id_attempts": 0,
-                "confirm_count": 0,
-                "is_being_taken": False
+                "last_seen": time.time()
             }
             
-            # --- IDENTIFICATION FINE (OBJET PAR OBJET) ---
-            # Tentative d'identification FLANN limitée pour économiser le CPU
-            if "real_label" not in SHELF_STATE[camera_id][track_id] and SHELF_STATE[camera_id][track_id]["id_attempts"] < 5:
+            # --- IDENTIFICATION SPECTRAL-TEXTURE (OBJET PAR OBJET) ---
+            current_label = SHELF_STATE[camera_id][track_id].get("real_label", name)
+            
+            if current_label != "person" and len(KNOWN_PRODUCT_NAMES_LIST) > 0:
                 try:
                     crop = img.crop((x1, y1, x2, y2))
-                    label = identify_product_in_crop(crop)
-                    if label:
-                        SHELF_STATE[camera_id][track_id]["real_label"] = label
-                    SHELF_STATE[camera_id][track_id]["id_attempts"] += 1
-                except: pass
-
-            current_label = SHELF_STATE[camera_id][track_id].get("real_label", name)
+                    crop_cv = cv2.cvtColor(np.array(crop), cv2.COLOR_RGB2BGR)
+                    
+                    # Signature "Multi-spectrale" (Couleur + Texture)
+                    spectral = analyze_spectral_signature(crop_cv)
+                    
+                    # Correspondance FLANN
+                    detected_product = identify_product_in_crop(crop)
+                    if detected_product:
+                        SHELF_STATE[camera_id][track_id]["real_label"] = detected_product
+                        current_label = detected_product
+                except Exception:
+                    pass # Erreur de crop si hors champ
             
             # LOGIQUE D'INTERACTION : Est-ce qu'une main touche cet objet ?
             is_touched = False
@@ -1246,12 +1267,8 @@ def process_pick_and_go_logic(camera_id, img):
                     is_touched = True
                     if grabbing:
                         is_taken = True
-                        SHELF_STATE[camera_id][track_id]["is_being_taken"] = True
-                        # On incrémente le compteur de confiance si l'objet est saisi
-                        SHELF_STATE[camera_id][track_id]["confirm_count"] += 1
-                        
                         # On mémorise quelle personne a pris cet objet
-                        if h_idx < len(hand_positions) and h_idx in hand_to_person_track_id:
+                        if h_idx in hand_to_person_track_id:
                             SHELF_STATE[camera_id][track_id]["last_person_tid"] = hand_to_person_track_id[h_idx]
                     
                     # AJOUT VECTEUR VISUEL (Ligne main -> objet)
@@ -1275,14 +1292,14 @@ def process_pick_and_go_logic(camera_id, img):
             # On utilise le 'current_label' qui peut être le nom précis (Coca)
             display_name = current_label
             price_info = DB_PRODUITS.get(display_name.lower(), "??")
-            label_text = f"{'PRIS ' if is_taken else ''}{display_name.upper()} : {price_info} FCFA"
+            label_text = f"{'✋ ' if is_taken else ''}{display_name.upper()} : {price_info} FCFA"
 
             # Dessin simple de la bounding box sur l'image de retour
             detections_to_draw.append({
                 "type": "box",
                 "box": box,
-                "label": f"MATCH: {current_label} (ID:{track_id})",
-                "color": "#00f2ff",}) # Bleu néon pour "Confirmé"
+                "label": label_text,
+                "color": color,})
 
     # Mise à jour du compteur global pour cette caméra dans les infos de feed
     if camera_id in CAMERA_FEEDS:
@@ -1298,21 +1315,16 @@ def process_pick_and_go_logic(camera_id, img):
         if track_id not in current_visible_ids:
             SHELF_STATE[camera_id][track_id]["missing_frames"] += 1
 
-            # LOGIQUE TURBO : On valide l'achat après 15 frames de disparition 
-            # mais UNIQUEMENT si l'objet a été bien identifié auparavant
             if SHELF_STATE[camera_id][track_id]["missing_frames"] == 15:
                 product_name = SHELF_STATE[camera_id][track_id].get("real_label", SHELF_STATE[camera_id][track_id]["class"])
                 price = DB_PRODUITS.get(product_name.lower(), 0)
                 
-                # Sécurité persistence : L'IA doit avoir confirmé l'objet au moins 10 fois
-                if SHELF_STATE[camera_id][track_id].get("confirm_count", 0) < 10:
-                    continue
-
-                # Sécurité : Éviter d'enregistrer des produits inconnus ou à prix nul
-                # Nettoyage des chaînes pour éviter les erreurs de comparaison
-                if not product_name or str(price) == "0" or "no label" in product_name.lower():
-                    print(f"⚠️ Achat ignoré (Produit non identifié ou prix 0) : {product_name}")
-                    continue
+                # AJOUT : On place le produit en "Attente de Paiement" pour cette borne
+                PENDING_SCANS[camera_id] = {
+                    "product": product_name,
+                    "price": price,
+                    "time": time.time()
+                }
 
                 # RETROUVER L'ACHETEUR VIA TRACKING
                 p_tid = SHELF_STATE[camera_id][track_id].get("last_person_tid")
@@ -1342,8 +1354,8 @@ def process_pick_and_go_logic(camera_id, img):
                     "action": "achat",
                     "camera": camera_id
                 }
-                # Utilisation d'un thread dédié pour l'envoi API afin de ne pas bloquer l'analyse IA
-                threading.Thread(target=log_transaction_via_api, args=(payload,), daemon=True).start()
+                # On lance l'appel API de manière asynchrone pour ne pas bloquer la vidéo
+                asyncio.create_task(asyncio.to_thread(log_transaction_via_api, payload))
             
             # Si disparu depuis trop longtemps (ex: 100 frames), on l'oublie pour nettoyer la mémoire
             if SHELF_STATE[camera_id][track_id]["missing_frames"] > 100:
@@ -1410,45 +1422,30 @@ def draw_hud(img, detections):
                         draw.line([points[start_idx], points[end_idx]], fill="white", width=2)
         
         elif det['type'] == 'pose':
-            # Dessiner le squelette complet du corps (Toutes les parties du corps)
             if mp_pose:
                 lms = det['landmarks']
-                width, height = img.size
-                points = {}
-                for idx, lm in enumerate(lms.landmark):
-                    if lm.visibility > 0.5: # On ne dessine que les parties visibles
-                        px, py = int(lm.x * width), int(lm.y * height)
-                        points[idx] = (px, py)
-                        draw.ellipse([px-4, py-4, px+4, py+4], fill="#ff00f2") # Rose néon
+                w, h = img.size
+                # Dessiner les connexions du corps (Squelette)
+                for conn in mp_pose.POSE_CONNECTIONS:
+                    p1 = lms.landmark[conn[0]]
+                    p2 = lms.landmark[conn[1]]
+                    # On ne dessine que si les points sont bien visibles
+                    if p1.visibility > 0.5 and p2.visibility > 0.5:
+                        draw.line([(p1.x * w, p1.y * h), (p2.x * w, p2.y * h)], fill="#00FF41", width=2)
                 
-                for start_idx, end_idx in mp_pose.POSE_CONNECTIONS:
-                    if start_idx in points and end_idx in points:
-                        draw.line([points[start_idx], points[end_idx]], fill="white", width=2)
-        
-        elif det['type'] == 'pose':
-            # Dessiner le squelette complet du corps (Toutes les parties du corps)
-            if mp_pose:
-                lms = det['landmarks']
-                width, height = img.size
-                points = {}
-                for idx, lm in enumerate(lms.landmark):
-                    if lm.visibility > 0.5: # On ne dessine que les parties visibles
-                        px, py = int(lm.x * width), int(lm.y * height)
-                        points[idx] = (px, py)
-                        draw.ellipse([px-4, py-4, px+4, py+4], fill="#ff00f2") # Rose néon
-                
-                for start_idx, end_idx in mp_pose.POSE_CONNECTIONS:
-                    if start_idx in points and end_idx in points:
-                        draw.line([points[start_idx], points[end_idx]], fill="white", width=2)
+                # Dessiner les articulations
+                for lm in lms.landmark:
+                    if lm.visibility > 0.5:
+                        px, py = int(lm.x * w), int(lm.y * h)
+                        draw.ellipse([px-2, py-2, px+2, py+2], fill="#00f2ff")
 
-        elif det['type'] == 'path':
-            # Dessine la trajectoire du geste
-            pts = det['points']
-            if len(pts) > 1:
-                draw.line(pts, fill=det['color'], width=3)
-                # Point final plus gros pour marquer le "bout" du bras
-                last = pts[-1]
-                draw.ellipse([last[0]-5, last[1]-5, last[0]+5, last[1]+5], fill="#00f2ff")
+        elif det['type'] == 'heart':
+            hx, hy = det['pos']
+            # Dessiner un viseur/cadre sur le coeur
+            size = 12
+            draw.ellipse([hx-size, hy-size, hx+size, hy+size], outline="#FF0000", width=2)
+            draw.line([hx-size-4, hy, hx+size+4, hy], fill="#FF0000", width=1)
+            draw.line([hx, hy-size-4, hx, hy+size+4], fill="#FF0000", width=1)
         
         elif det['type'] == 'vector':
             # Dessine le vecteur de force/interaction
@@ -1462,6 +1459,42 @@ def draw_hud(img, detections):
             draw.ellipse([end[0]-4, end[1]-4, end[0]+4, end[1]+4], fill=color, outline="white")
         
     return img
+
+def draw_hud_pro(image_np, detections_yolo):
+    """
+    Version professionnelle du HUD utilisant la librairie Supervision.
+    Offre un rendu plus propre et des étiquettes de confiance.
+    """
+    # 1. Convertir les résultats YOLO en format Supervision
+    detections = sv.Detections.from_ultralytics(detections_yolo)
+    
+    # 2. Créer les étiquettes (Nom + Confiance)
+    labels = [
+        f"{MODEL.names[class_id]} {confidence:0.2f}"
+        for _, _, confidence, class_id, _ in detections
+    ]
+    
+    # 3. Dessiner sur l'image
+    annotated_image = BOX_ANNOTATOR.annotate(scene=image_np, detections=detections)
+    annotated_image = LABEL_ANNOTATOR.annotate(scene=annotated_image, detections=detections, labels=labels)
+    return annotated_image
+
+@app.post("/api/clean_reset")
+async def clean_reset_system():
+    """Vide la mémoire du système pour recommencer avec de nouveaux produits."""
+    global SHELF_STATE, PERSON_TRACK_MEMORY, DB_PRODUITS
+    SHELF_STATE = {}
+    PERSON_TRACK_MEMORY = {}
+    
+    # Supprimer le cache de reconnaissance d'objets
+    if os.path.exists("products_index.pkl"):
+        os.remove("products_index.pkl")
+    
+    # Re-synchroniser depuis Google (qui devrait être vidé manuellement par l'utilisateur)
+    sync_products_from_google()
+    load_known_products(force_reload=True)
+    
+    return {"status": "success", "message": "Système réinitialisé"}
 
 
 @app.get("/api/cameras")
@@ -1483,7 +1516,7 @@ async def get_active_cameras():
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_dashboard():
-    mobile_url = NGROK_URL if NGROK_URL else f"https://{LOCAL_IP}:8000/mobile"
+    mobile_url = f"https://{LOCAL_IP}:8000/mobile"
     html = f"""
     <!DOCTYPE html>
     <html lang="fr">
@@ -1516,10 +1549,6 @@ async def admin_dashboard():
             .grid-cell img {{ width: 100%; height: 100%; object-fit: contain; }}
             .grid-label {{ position: absolute; top: 5px; left: 5px; background: rgba(0,0,0,0.6); color: #00f2ff; padding: 2px 6px; font-size: 0.8em; font-weight: bold; }}
 
-            /* État déconnecté */
-            .grid-cell.offline {{ filter: grayscale(1) opacity(0.5); }}
-            .grid-cell.offline::after {{ content: "CAMÉRA HORS-LIGNE"; position: absolute; color: #ff3333; font-weight: bold; font-size: 0.8em; }}
-
             /* Panneau latéral (Infos & Contrôles) */
             .side-panel {{ flex: 1; background: #1f1f1f; display: flex; flex-direction: column; gap: 10px; padding: 10px; border-radius: 4px; overflow-y: auto; }}
             .panel-box {{ background: #2b2b2b; padding: 10px; border-radius: 4px; border: 1px solid #3d3d3d; }}
@@ -1540,16 +1569,16 @@ async def admin_dashboard():
     </head>
     <body>
         <div class="menubar">
-            <div class="brand">HYFLEX CONTROL ROOM</div>
-            <div class="status">REC [ACTIVE] | CAMERAS: 5 | CPU: 14% | CLOUD: CONNECTED</div>
+            <div class="brand">🛡️ HYFLEX OBS STUDIO</div>
+            <div class="status">● REC [00:14:52] | CPU: 12% | CLOUD: CONNECTED</div>
         </div>
         
         <div class="main-container">
             <!-- Grande vue principale (La première caméra ou celle sélectionnée) -->
             <div class="preview-area" id="preview-container">
-                <div class="preview-label">PROGRAM</div>
+                <div class="preview-label">🛡️ SALLE DE CONTRÔLE - MANAGER</div>
                 <div class="top-controls">
-                    <button class="fs-btn" onclick="toggleFullscreen()">FULLSCREEN</button>
+                    <button class="fs-btn" onclick="toggleFullscreen()">⛶ FULL</button>
                 </div>
                 <div id="grid-view" class="grid-layout">
                     <div style="color:#666; display:flex; align-items:center; justify-content:center; grid-column:1/-1; width:100%; height:100%;">EN ATTENTE DE FLUX...</div>
@@ -1559,12 +1588,12 @@ async def admin_dashboard():
             <!-- Panneau de droite -->
             <div class="side-panel">
                 <div class="panel-box">
-                    <div class="panel-title">LIVE STATUS</div>
+                    <div class="panel-title">📊 LIVE STATUS</div>
                     <div id="info-display" style="font-size: 0.9em; color: #ccc;">
                         <div class="panel-box" style="border:none; padding:0; background:none;">
-                            <div class="panel-title" style="font-size:0.8em; color:#aaa; text-align:center;">COMPTEUR VISAGES</div>
+                            <div class="panel-title" style="font-size:0.8em; color:#aaa; text-align:center;">👥 COMPTEUR VISAGES</div>
                             <div id="big-counter" style="font-size: 3.5em; color: #00f2ff; text-align: center; font-weight: bold; margin: 10px 0;">0</div>
-                            <button onclick="triggerCleaning()" style="width:100%; padding:10px; background:#222; color:#fff; border:1px solid #444; border-radius:4px; cursor:pointer; font-weight:bold; text-transform:uppercase; transition:0.2s;">MODE NETTOYAGE</button>
+                            <button onclick="triggerCleaning()" style="width:100%; padding:10px; background:#222; color:#fff; border:1px solid #444; border-radius:4px; cursor:pointer; font-weight:bold; text-transform:uppercase; transition:0.2s;">🧹 MODE NETTOYAGE</button>
                         </div>
 
                         Système actif.<br>
@@ -1574,7 +1603,7 @@ async def admin_dashboard():
                 </div>
 
                 <div class="panel-box">
-                    <div class="panel-title">PAYDUNYA CONFIG</div>
+                    <div class="panel-title">⚙️ PAYDUNYA CONFIG</div>
                     <div class="mode-toggle">
                         <button id="mode-test" class="mode-btn active" onclick="setPayMode('test')">SANDBOX</button>
                         <button id="mode-live" class="mode-btn" onclick="setPayMode('live')">LIVE</button>
@@ -1583,25 +1612,26 @@ async def admin_dashboard():
                     <input type="password" id="pd-private" class="settings-input" placeholder="Private Key">
                     <input type="password" id="pd-public" class="settings-input" placeholder="Public Key">
                     <input type="password" id="pd-token" class="settings-input" placeholder="Token">
-                    <button onclick="savePaySettings()" class="fs-btn" style="width:100%; margin-bottom:5px;">ENREGISTRER CLES</button>
-                    <button onclick="triggerSetup()" class="fs-btn" style="width:100%; border-color: #ff9900; color: #ff9900;">INITIALISER DB (SETUP)</button>
+                    <input type="text" id="python-url" class="settings-input" placeholder="URL Serveur Python (Ngrok)">
+                    <button onclick="savePaySettings()" class="fs-btn" style="width:100%; margin-bottom:5px;">💾 ENREGISTRER CLÉS</button>
+                    <button onclick="checkPayDunya()" class="fs-btn" style="width:100%; background: #222; border-color: #00ff41; color: #00ff41; margin-bottom:5px;">🧪 TESTER CONNEXION</button>
+                    <button onclick="triggerSetup()" class="fs-btn" style="width:100%; border-color: #ff9900; color: #ff9900;">⚡ INITIALISER DB (SETUP)</button>
                 </div>
 
                 <div class="panel-box">
-                    <div class="panel-title">GESTION DATA</div>
-                    <a href="/api/export_transactions" class="fs-btn" style="text-decoration:none; background:#ff9900; color:black; display:block; text-align:center; margin-bottom:10px; font-weight:bold;">EXPORTER CSV</a>
-                    <button onclick="triggerCleaning()" style="width:100%; padding:8px; background:#444; color:#fff; border:none; cursor:pointer; margin-bottom:10px;">CLEAR TRACKING</button>
-                    <button onclick="location.href='/register_product'" style="width:100%; padding:10px; background:#00f2ff; color:#000; border:none; border-radius:4px; cursor:pointer; font-weight:bold; text-transform:uppercase;">MODE TRAINING</button>
+                    <div class="panel-title">💾 GESTION DATA</div>
+                    <a href="/api/export_transactions" class="fs-btn" style="text-decoration:none; background:#ff9900; color:black; display:block; text-align:center; margin-bottom:10px; font-weight:bold;">📥 EXPORTER CSV (Daily)</a>
+                    <button onclick="triggerCleaning()" style="width:100%; padding:8px; background:#444; color:#fff; border:none; cursor:pointer;">🧹 CLEAR TRACKING</button>
                 </div>
 
                 <div class="panel-box">
                     <div class="panel-title">ACCÈS RAPIDES</div>
-                    <a href="/manager" style="color: #ff9900; text-decoration: none; display:block; padding:5px; border-bottom:1px solid #333;">MANAGER</a>
-                    <a href="/client" style="color: #00f2ff; text-decoration: none; display:block; padding:5px;">CLIENT WALLET</a>
+                    <a href="/manager" style="color: #ff9900; text-decoration: none; display:block; padding:5px; border-bottom:1px solid #333;">🛠️ MANAGER</a>
+                    <a href="/client" style="color: #00f2ff; text-decoration: none; display:block; padding:5px;">👤 CLIENT WALLET</a>
                 </div>
 
                 <div class="panel-box">
-                    <div class="panel-title">CONNECT MOBILE</div>
+                    <div class="panel-title">📱 CONNECT MOBILE</div>
                     <div class="qr-side"><img src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data={mobile_url}" width="120"></div>
                     <p style="font-size:0.7em; color:#888; text-align:center; margin-top:5px;">Scannez pour ajouter une caméra</p>
                 </div>
@@ -1630,6 +1660,7 @@ async def admin_dashboard():
                         document.getElementById('pd-private').value = data.settings.privateKey;
                         document.getElementById('pd-public').value = data.settings.publicKey;
                         document.getElementById('pd-token').value = data.settings.token;
+                        document.getElementById('python-url').value = data.settings.pythonUrl || "";
                         setPayMode(data.settings.mode);
                     }}
                 }} catch(e) {{ console.error("Erreur chargement settings"); }}
@@ -1639,6 +1670,16 @@ async def admin_dashboard():
                 currentPayMode = mode;
                 document.getElementById('mode-test').className = mode === 'test' ? 'mode-btn active' : 'mode-btn';
                 document.getElementById('mode-live').className = mode === 'live' ? 'mode-btn active' : 'mode-btn';
+            }}
+
+            async function checkPayDunya() {{
+                const res = await fetch('/api/test_paydunya');
+                const data = await res.json();
+                if(data.success) {{
+                    alert("✅ PayDunya Répond ! Code: " + data.code);
+                }} else {{
+                    alert("❌ Erreur de configuration PayDunya");
+                }}
             }}
 
             async function savePaySettings() {{
@@ -1782,9 +1823,7 @@ async def admin_dashboard():
                         ws.binaryType = "blob";
                         ws.onmessage = (e) => {{
                             const img = document.getElementById('grid-img-' + cam.id);
-                            const cell = document.getElementById('grid-cell-' + cam.id);
                             if(img) {{
-                                if(cell) cell.classList.remove('offline');
                                 if (img.dataset.lastUrl) URL.revokeObjectURL(img.dataset.lastUrl);
                                 const url = URL.createObjectURL(e.data);
                                 img.src = url;
@@ -1855,7 +1894,7 @@ async def admin_dashboard():
                             const div = document.createElement('div');
                             div.className = 'scene-card';
                             div.id = 'card-' + cam.id;
-                            div.innerHTML = `<img src="/video_feed/${{cam.id}}" class="scene-thumb"><div class="scene-name">CAM ${{cam.id}}</div>`;
+                            div.innerHTML = `<img src="/video_feed/${{cam.id}}" class="scene-thumb"><div class="scene-name">📷 ${{cam.id}}</div>`;
                             container.appendChild(div);
                         }}
                     }});
@@ -1938,27 +1977,65 @@ async def manager_dashboard():
             <a href="/" class="back-btn">⬅ Retour Hub</a>
             <h1>🛠️ MANAGER STUDIO</h1>
             
-            <div class="card">
-                <h2 style="margin-top:0">ENREGISTRER UN PRODUIT</h2>
-                <p style="color:#aaa; font-size:0.9em;">Ajoutez un produit à la base de données. Le nom doit correspondre à la classe détectée (ex: 'bottle').</p>
-                <a href="/register_product" style="display:block; background:#00f2ff; color:black; text-align:center; padding:10px; border-radius:4px; text-decoration:none; font-weight:bold; margin-bottom:15px;">SCANNER PRODUIT 360° (DATASET)</a>
-                <form action="/add_product_action" method="post">
-                    <input type="text" name="product_name" placeholder="Nom du produit (ex: coca)" required>
-                    <input type="number" name="price" placeholder="Prix (FCFA)" required>
-                    <button type="submit">ENREGISTRER PRODUIT</button>
-                </form>
-            </div>
+            <div class="grid">
+                <div class="card">
+                    <h2 style="margin-top:0">📦 AJOUTER PRODUIT</h2>
+                    <form id="prodForm">
+                        <input type="text" id="p_name" placeholder="Nom du produit (ex: Coca 33cl)" required>
+                        <input type="number" id="p_price" placeholder="Prix (FCFA)" required>
+                        <input type="text" id="p_barcode" placeholder="Code-Barre / RFID Tag">
+                        <button type="button" onclick="submitProduct()">💾 ENREGISTRER</button>
+                    </form>
+                    <div id="p_status"></div>
+                </div>
 
-            <div class="card">
-                <h2 style="margin-top:0">📋 BASE DE DONNÉES</h2>
-                <table>
-                    <thead><tr><th>NOM</th><th>PRIX</th></tr></thead>
-                    <tbody>
-                        {products_html}
-                    </tbody>
-                </table>
+                <div class="card">
+                    <h2 style="margin-top:0">📊 VUE D'ENSEMBLE</h2>
+                    <div class="tabs">
+                        <button class="tab-btn active" onclick="loadTab('products')">PRODUITS</button>
+                        <button class="tab-btn" onclick="loadTab('users')">CLIENTS</button>
+                    </div>
+                    <div id="table-content" style="max-height: 400px; overflow-y: auto;">
+                        <p>Chargement des données...</p>
+                    </div>
+                </div>
             </div>
         </div>
+        <script>
+            async function submitProduct() {{
+                const formData = new FormData();
+                formData.append('product_name', document.getElementById('p_name').value);
+                formData.append('price', document.getElementById('p_price').value);
+                formData.append('barcode', document.getElementById('p_barcode').value);
+                
+                const res = await fetch('/add_product_action', {{ method: 'POST', body: formData }});
+                if(res.ok) {{ 
+                    alert("Produit enregistré !"); 
+                    location.reload(); 
+                }}
+            }}
+
+            async function loadTab(type) {{
+                const container = document.getElementById('table-content');
+                container.innerHTML = "Chargement...";
+                const endpoint = type === 'products' ? '/api/products_data' : '/api/users_list';
+                const res = await fetch(endpoint);
+                const data = await res.json();
+                
+                let html = "<table><thead><tr>";
+                if(type === 'products') {{
+                    html += "<th>NOM</th><th>PRIX</th></tr></thead><tbody>";
+                    data.forEach(p => html += `<tr><td>${{p.name}}</td><td>${{p.price}} FCFA</td></tr>`);
+                }} else {{
+                    html += "<th>NOM</th><th>SOLDE</th></tr></thead><tbody>";
+                    data.forEach(u => html += `<tr><td>${{u.name}}</td><td>${{u.balance}} FCFA</td></tr>`);
+                }}
+                html += "</tbody></table>";
+                container.innerHTML = html;
+            }}
+            
+            window.onload = () => loadTab('products');
+        </script>
     </body>
     </html>
     """
@@ -1975,7 +2052,7 @@ async def register_product_interface():
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { background: #050505; color: #fff; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-        .container { width: 90%; max-width: 400px; background: #111; padding: 25px; border: 1px solid #333; border-radius: 12px; border: 2px solid #ff9900; text-align: center; box-shadow: 0 0 30px rgba(255, 153, 0, 0.2); }
+        .container { width: 90%; max-width: 400px; background: #111; padding: 25px; border: 1px solid #333; border-radius: 12px; border: 2px solid #ff9900; text-align: center; }
         h1 { color: #ff9900; margin-bottom: 20px; font-size: 1.6em; text-transform: uppercase; letter-spacing: 2px; font-weight: 800; }
         input { width: 100%; padding: 15px; margin: 10px 0; background: #222; border: 1px solid #444; color: white; border-radius: 8px; box-sizing: border-box; font-size: 1.1em; text-align: center; }
         input:focus { border-color: #ff9900; outline: none; }
@@ -2016,10 +2093,10 @@ async def register_product_interface():
 
             const steps = [
                 { pose: "front", text: "Vue de FACE" },
-                { pose: "back", text: "Vue ARRIERE" },
-                { pose: "left", text: "Cote GAUCHE" },
-                { pose: "right", text: "Cote DROIT" },
-                { pose: "top", text: "Vue de DESSUS" }
+                { pose: "back", text: "Vue ARRIÈRE 🔄" },
+                { pose: "left", text: "Côté GAUCHE ⬅️" },
+                { pose: "right", text: "Côté DROIT ➡️" },
+                { pose: "top", text: "Vue de DESSUS ⬆️" }
             ];
             let currentStep = 0;
 
@@ -2045,7 +2122,7 @@ async def register_product_interface():
                 }
                 const step = steps[currentStep];
                 guideText.innerText = `Étape ${currentStep + 1}/5 : ${step.text}`;
-                btn.innerText = "CAPTURER";
+                btn.innerText = "📸 CAPTURER";
                 progress.style.width = ((currentStep / steps.length) * 100) + "%";
             }
 
@@ -2121,7 +2198,7 @@ async def add_product_action(request: Request):
     
 
     if name and price:
-        print(f"Enregistrement manuel Dashboard : {name} -> {price} FCFA")
+        print(f"📝 Enregistrement manuel Dashboard : {name} -> {price} FCFA")
         add_product_to_google(name, price)
         return RedirectResponse(url="/manager", status_code=303) # Retour au manager
     return {"error": "Données manquantes"}
@@ -2188,7 +2265,7 @@ async def websocket_view_endpoint(websocket: WebSocket, camera_id: str):
                     await websocket.send_bytes(buf.getvalue())
                 except:
                     pass
-            await asyncio.sleep(0.08) # ~12 FPS pour l'admin (économise le CPU)
+            await asyncio.sleep(0.04) # ~25 FPS pour l'admin
     except Exception:
         pass # Déconnexion normale
 
@@ -2299,8 +2376,8 @@ async def mobile_interface():
             video { width: 100%; height: 100%; object-fit: cover; }
             #overlay { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.7); padding: 20px; font-size: 16px; min-height: 80px; transition: 0.3s; z-index: 2; border-top: 1px solid #444; }
             #brand-overlay { position: absolute; top: 20px; left: 20px; z-index: 2; font-weight: bold; text-shadow: 0 2px 4px rgba(0,0,0,0.8); letter-spacing: 1px; }
-            .controls { padding: 15px; background: #222; text-align: center; z-index: 3; display: flex; gap: 10px; justify-content: center; }
-            button { flex: 1; background: #00f2ff; color: #000; border: none; padding: 15px; font-size: 14px; border-radius: 30px; cursor: pointer; font-weight: bold; box-shadow: 0 0 15px rgba(0, 242, 255, 0.4); text-transform: uppercase; }
+            .controls { padding: 15px; background: #222; text-align: center; z-index: 3; }
+            button { background: #00f2ff; color: #000; border: none; padding: 15px 30px; font-size: 18px; border-radius: 30px; cursor: pointer; width: 80%; max-width: 300px; font-weight: bold; box-shadow: 0 0 15px rgba(0, 242, 255, 0.4); text-transform: uppercase; }
             button.stop { background: #dc3545; }
             #status { font-size: 12px; color: #aaa; margin-bottom: 5px; }
             .blink { animation: blinker 1s linear infinite; color: #0f0; }
@@ -2309,11 +2386,13 @@ async def mobile_interface():
     </head>
     <body>
         <div id="video-container">
-            <div id="brand-overlay">HYFLEX<br><span style="color:#00f2ff; font-size:0.8em;">SHOP & GO</span></div>
+            <div id="brand-overlay">🛒 HYFLEX<br><span style="color:#00f2ff; font-size:0.8em;">SHOP & GO</span></div>
             <video id="vid" autoplay playsinline muted></video>
+            <a href="/admin" style="position:absolute; top:20px; right:20px; z-index:10; background:rgba(0,0,0,0.5); color:#00f2ff; padding:8px 15px; border-radius:20px; text-decoration:none; border:1px solid #00f2ff; font-size:12px;">🛠️ MANAGER</a>
             <div id="overlay">
                 <div id="status">Prêt</div>
                 <div id="result">Appuyez sur Démarrer pour voir le tapis en direct.</div>
+                <a href="/register" style="display:block; color:#00f2ff; text-align:center; margin-top:10px; font-size:13px; text-decoration:none;">✨ Configurer mon Face ID</a>
             </div>
         </div>
         <div class="controls">
@@ -2335,7 +2414,7 @@ async def mobile_interface():
                 if (isStreaming) {
                     isStreaming = false;
                     if (ws) { ws.close(); ws = null; }
-                    btn.textContent = "Demarrer le Live";
+                    btn.textContent = "🔴 Démarrer le Live";
                     btn.className = "";
                     statusDiv.innerHTML = "Pause";
                     return;
@@ -2347,7 +2426,7 @@ async def mobile_interface():
                     });
                     video.srcObject = stream;
                     
-                    btn.textContent = "Arreter";
+                    btn.textContent = "⏹ Arrêter";
                     btn.className = "stop";
                     
                     // Connexion WebSocket (Le tuyau rapide)
@@ -2442,38 +2521,80 @@ if __name__ == "__main__":
     if qrcode:
         print(f"\n📱 SCANNEZ CE CODE POUR CONNECTER VOTRE MOBILE :")
         qr = qrcode.QRCode(version=1, border=2)
-        qr_data = f"{NGROK_URL}/mobile" if NGROK_URL else f"https://{IP}:8000/mobile"
-        qr.add_data(qr_data)
+        qr.add_data(f"https://{IP}:8000/mobile")
         qr.print_ascii(invert=True)
     else:
-        print(f"\n📱 LIEN MOBILE : {NGROK_URL if NGROK_URL else f'https://{IP}:8000/mobile'} (Installez 'qrcode' pour voir le flashcode ici)")
+        print(f"\n📱 LIEN MOBILE : https://{IP}:8000/mobile (Installez 'qrcode' pour voir le flashcode ici)")
 
     print(f"\n⚠️  ALERTE SÉCURITÉ NAVIGATEUR (IMPORTANT) :")
     print(f"   1. Vous verrez un écran rouge 'Votre connexion n'est pas privée'.")
     print(f"   2. Cliquez sur 'Paramètres avancés' (Advanced).")
     print(f"   3. Cliquez sur 'Continuer vers {IP} (dangereux)'.")
     print(f"="*60 + "\n")
+
+    uvicorn.run(app, host="0.0.0.0", port=8000, ssl_keyfile="key.pem", ssl_certfile="cert.pem")
+
 class RfidAuth(BaseModel):
     uid: str
 
 @app.post("/api/rfid_login")
 async def rfid_login(req: RfidAuth):
-    # AUTHENTIFICATION INSTANTANÉE (Zéro délai)
-    user_name = "Client_Premium" 
-    
-    # On assigne l'utilisateur aux caméras immédiatement en local
-    for cam_id in list(LATEST_FRAME_BYTES.keys()):
-        CAMERA_USER_ASSIGNMENTS[cam_id] = user_name
+    """Vérifie l'UID RFID, active le tracking et renvoie les infos client."""
+    payload = {"action": "login", "payload": {"rfidUid": req.uid}}
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
+        data = resp.json()
         
-    # On lance la synchro Google en arrière-plan sans attendre la réponse
-    threading.Thread(target=lambda: requests.post(APPS_SCRIPT_URL, json={"action":"login", "uid":req.uid}), daemon=True).start()
-    
-    return {"status": "success", "authorized": True, "user": user_name}
+        if data.get("success") and data.get("authorized"):
+            user_info = data["user_data"]
+            user_name = user_info["name"]
+            user_phone = user_info.get("phone", "Unknown")
+            
+            # LOGIQUE DE PAIEMENT RFID :
+            # 1. On assigne l'utilisateur à la caméra la plus proche (Session Start)
+            for cam_id in CAMERA_FEEDS.keys():
+                CAMERA_USER_ASSIGNMENTS[cam_id] = user_name
+                ACTIVE_SESSIONS[cam_id] = {"user": user_name, "time": time.time()}
+
+            # 2. On cherche s'il y a un produit en attente pour finaliser l'achat (Session End)
+            purchase_made = False
+            for cam_id, scan in list(PENDING_SCANS.items()):
+                # Si le scan date de moins de 30 secondes
+                if time.time() - scan["time"] < 30:
+                    # Déclencher le débit
+                    price = scan["price"]
+                    if user_name in WALLETS:
+                        WALLETS[user_name] -= int(price)
+                        save_wallets()
+                        
+                    # Log transaction
+                    payload = {"userID": user_name, "produit": scan["product"], "montant": price, "action": "RFID_PAY", "camera": cam_id}
+                    threading.Thread(target=log_transaction_via_api, args=(payload,), daemon=True).start()
+                    
+                    del PENDING_SCANS[cam_id] # Nettoyer après paiement
+                    purchase_made = True
+                    break
+            
+            return {
+                "status": "success", 
+                "authorized": True, 
+                "user": user_name,
+                "purchase": purchase_made,
+                "balance": WALLETS.get(user_name, user_info.get("balance"))
+            }
+        
+        return {"status": "error", "authorized": False, "message": "Badge inconnu"}
+    except Exception as e:
+        print(f"Erreur RFID Proxy: {e}")
+        return {"status": "error", "authorized": False}
 
 @app.get("/api/users_list")
 async def get_users_list():
     """Récupère la liste des utilisateurs pour le manager."""
     try:
+        payload = {"action": "login", "payload": {"phone": "admin_list"}} # Trigger simulé pour lister
+        # Note: Dans un vrai système, on ajouterait une action 'getUsers' dans l'Apps Script
+        # Ici on va simuler ou appeler une fonction Apps Script dédiée
         resp = requests.post(APPS_SCRIPT_URL, json={"action": "getUsers"})
         return resp.json()
     except:
@@ -2489,11 +2610,9 @@ async def assign_badge(phone: str = Form(...), rfid_uid: str = Form(...)):
     }
     try:
         resp = requests.post(APPS_SCRIPT_URL, json=payload)
-        return {"status": "success"} if resp.status_code == 200 else {"status": "error"}
+        if resp.status_code == 200:
+            print(f"🗃️ Badge {rfid_uid} assigné à {phone}")
+            return {"status": "success"}
+        return {"status": "error"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-
-if __name__ == "__main__":
-    import uvicorn
-    # ... (les prints de démarrage existants) ...
-    uvicorn.run(app, host="0.0.0.0", port=8000, ssl_keyfile="key.pem", ssl_certfile="cert.pem")

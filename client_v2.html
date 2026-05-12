@@ -27,6 +27,10 @@
         <div class="flex items-center gap-2">
             <div id="connection-indicator" class="hidden text-[10px] font-bold text-green-600 bg-green-50 px-2 py-1 rounded-full"><span class="status-dot"></span> LIVE</div>
             <div id="user-initials" class="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center text-green-600 font-bold">?</div>
+            <!-- Bouton Manager invisible par défaut -->
+            <a href="/admin" id="manager-quick-link" class="hidden w-10 h-10 rounded-full bg-orange-100 flex items-center justify-center text-orange-600 shadow-sm transition active:scale-90">
+                <i class="fas fa-user-shield"></i>
+            </a>
         </div>
     </header>
 
@@ -56,6 +60,14 @@
             <input type="tel" id="reg-phone" placeholder="Numéro de téléphone" class="w-full bg-gray-100 border-none p-4 rounded-2xl outline-none focus:ring-2 focus:ring-green-500">
             <input type="email" id="reg-email" placeholder="Email (Reçus)" class="w-full bg-gray-100 border-none p-4 rounded-2xl outline-none focus:ring-2 focus:ring-green-500">
             <input type="password" id="reg-password" placeholder="Créer un Code PIN" class="w-full bg-gray-100 border-none p-4 rounded-2xl outline-none focus:ring-2 focus:ring-green-500">
+            
+            <div class="text-left mt-2">
+                <label class="text-[10px] font-bold text-gray-400 uppercase ml-1">Type de profil</label>
+                <select id="reg-type" class="w-full bg-gray-100 border-none p-4 rounded-2xl outline-none focus:ring-2 focus:ring-green-500">
+                    <option value="Étudiant">🎓 Étudiant</option>
+                    <option value="Professionnel">💼 Professionnel</option>
+                </select>
+            </div>
             <button type="submit" class="w-full bg-green-500 text-white font-bold p-4 rounded-2xl shadow-lg mt-2 uppercase tracking-widest text-sm">Créer mon compte</button>
         </form>
     </div>
@@ -63,10 +75,11 @@
     <!-- Section Dashboard (Cachée par défaut) -->
     <div id="dashboard" class="hidden">
         <!-- ONGLET 1: IDENTIFICATION (QR & RFID) -->
+        <!-- ONGLET 1: IDENTIFICATION & SCAN -->
         <div id="tab-id" class="tab-content">
-            <div class="glass rounded-3xl p-6 mb-6 text-center border-b-4 border-dall-green">
+            <div class="glass rounded-3xl p-6 mb-4 text-center border-b-4 border-dall-green">
                 <div id="entry-status" class="inline-block px-3 py-1 rounded-full bg-gray-100 text-[10px] font-bold text-gray-400 mb-4 uppercase tracking-widest">
-                    En attente d'entrée
+                    Pass d'accès actif
                 </div>
                 <div class="bg-white p-4 rounded-2xl inline-block mb-4 shadow-inner border border-gray-100">
                     <div id="qr-code-display" class="w-40 h-40 flex items-center justify-center"></div>
@@ -75,7 +88,33 @@
                     <i class="fas fa-microchip text-xl text-green-600"></i>
                     <p class="font-bold text-sm tracking-tight" id="rfid-id">RFID: --- --- ---</p>
                 </div>
-                <p class="text-[10px] text-gray-400">Scannez pour entrer</p>
+                <p class="text-[10px] text-gray-400">Utilisez ce code ou votre badge pour entrer</p>
+            </div>
+
+            <!-- BOUTON SCANNER PRODUIT -->
+            <button onclick="switchTab('tab-scan')" class="w-full btn-orange rounded-3xl p-6 flex items-center justify-center gap-4 shadow-lg transform transition active:scale-95 mb-6">
+                <i class="fas fa-camera text-3xl"></i>
+                <div class="text-left">
+                    <p class="font-black text-xl leading-none">SCAN & GO</p>
+                    <p class="text-[10px] opacity-90 font-bold uppercase tracking-widest">Scanner l'article</p>
+                </div>
+            </button>
+        </div>
+
+        <!-- ONGLET SCANNER PHOTO -->
+        <div id="tab-scan" class="tab-content hidden">
+            <div class="glass rounded-3xl p-6 mb-6 text-center border-t-4 border-orange-500">
+                <h3 class="font-black text-gray-800 mb-4 uppercase text-sm">Viseur Optique</h3>
+                <div class="relative w-full aspect-square bg-black rounded-2xl overflow-hidden mb-6 border-4 border-dashed border-gray-300">
+                    <video id="scanner-video" class="w-full h-full object-cover" autoplay playsinline></video>
+                    <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+                        <div class="w-48 h-48 border-2 border-orange-500 rounded-lg shadow-[0_0_20px_rgba(249,115,22,0.5)]"></div>
+                        <div class="absolute w-full h-0.5 bg-red-500 animate-pulse shadow-[0_0_10px_red]"></div>
+                    </div>
+                </div>
+                <div id="scan-loading" class="hidden mb-4"><span class="loader"></span> <span class="text-xs font-bold text-orange-500">ANALYSE DU PRODUIT...</span></div>
+                <button onclick="simulateScan()" class="w-full bg-gray-800 text-white font-bold p-4 rounded-2xl mb-4 text-xs">DÉTECTION MANUELLE (DÉMO)</button>
+                <button onclick="switchTab('tab-id')" class="text-gray-400 text-[10px] font-bold uppercase">Retour</button>
             </div>
         </div>
 
@@ -189,6 +228,7 @@
     <!-- Barre de Navigation Fixe -->
     <nav id="bottom-nav" class="hidden fixed bottom-6 left-4 right-4 glass rounded-full p-2 flex justify-around items-center shadow-2xl border-t border-white/20">
         <button onclick="switchTab('tab-id')" class="nav-btn p-3 rounded-full text-green-600 bg-green-50"><i class="fas fa-id-card text-xl"></i></button>
+        <button onclick="switchTab('tab-scan')" class="nav-btn p-3 rounded-full text-gray-400"><i class="fas fa-barcode text-xl"></i></button>
         <button onclick="switchTab('tab-factures')" class="nav-btn p-3 rounded-full text-gray-400"><i class="fas fa-history text-xl"></i></button>
         <button onclick="switchTab('tab-paiement')" class="nav-btn p-3 rounded-full text-gray-400"><i class="fas fa-wallet text-xl"></i></button>
         <button onclick="switchTab('tab-settings')" class="nav-btn p-3 rounded-full text-gray-400"><i class="fas fa-user-cog text-xl"></i></button>
@@ -270,10 +310,64 @@ async function refreshUserData(manual = false) {
     } catch (e) {
         console.error("Erreur refresh:", e);
     } finally {
-        if (manual && icon) {
-            setTimeout(() => icon.classList.remove('fa-spin'), 500);
-        }
+    if (manual && icon) {
+        setTimeout(() => icon.classList.remove('fa-spin'), 500);
     }
+}
+
+let scannerStream = null;
+async function startScanner() {
+    try {
+        scannerStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        document.getElementById('scanner-video').srcObject = scannerStream;
+    } catch (e) { alert("Accès caméra refusé."); }
+}
+
+function stopScanner() {
+    if (scannerStream) scannerStream.getTracks().forEach(t => t.stop());
+}
+
+// Surcharge de switchTab pour gérer la caméra
+const originalSwitchTab = switchTab;
+switchTab = function(tabId) {
+    originalSwitchTab(tabId);
+    if (tabId === 'tab-scan') startScanner();
+    else stopScanner();
+};
+
+async function simulateScan() {
+    const productCode = prompt("Scannez ou entrez le nom du produit (ex: coca, biscuit) :");
+    if (!productCode) return;
+    
+    const loader = document.getElementById('scan-loading');
+    loader.classList.remove('hidden');
+    
+    const formData = new FormData();
+    formData.append('phone', currentUser.phone);
+    formData.append('product_code', productCode);
+    formData.append('user_name', currentUser.name);
+    formData.append('user_email', currentUser.email || "Non renseigné");
+
+    try {
+        const res = await fetch('/api/scan_and_pay', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await res.json();
+        
+        if (res.ok) {
+            alert(`✅ Achat validé ! Nouveau solde : ${data.new_balance} F. Un reçu a été envoyé par email.`);
+            currentUser.balance = data.new_balance;
+            localStorage.setItem('jeldem_session', JSON.stringify(currentUser));
+            refreshUserData(true);
+            switchTab('tab-factures');
+        } else {
+            alert("❌ Échec : " + (data.detail || "Erreur inconnue"));
+        }
+    } catch (e) {
+        alert("Erreur de connexion au serveur local.");
+    } finally { loader.classList.add('hidden'); }
+}
 }
 
 function updateUI() {
@@ -340,6 +434,7 @@ async function register() {
     const phone = document.getElementById('reg-phone').value;
     const email = document.getElementById('reg-email').value;
     const pass = document.getElementById('reg-password').value;
+    const userType = document.getElementById('reg-type').value;
 
     if(!name || !phone || !pass) return alert("Nom, Téléphone et Code PIN requis !");
 
@@ -350,7 +445,8 @@ async function register() {
                 name: name,
                 phone: phone,
                 email: email,
-                password: pass
+                password: pass,
+                userType: userType
             }
         };
         const res = await fetch(API_URL, { 
@@ -435,6 +531,11 @@ function showDashboard() {
     if (currentUser.name) {
         const names = currentUser.name.split(' ');
         document.getElementById('user-initials').innerText = (names[0][0] + (names[1] ? names[1][0] : '')).toUpperCase();
+    }
+    
+    // Vérification du rôle Manager
+    if (currentUser.userType === 'Manager' || currentUser.userType === 'Admin') {
+        document.getElementById('manager-quick-link').classList.remove('hidden');
     }
 
     // Démarrer le rafraîchissement automatique du solde (toutes le 10s)

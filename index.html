@@ -1,111 +1,149 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DALL JAMM - Hub Intelligente</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <script src="config.js"></script>
-    <style>
-        body { 
-            background-image: linear-gradient(rgba(10, 10, 12, 0.9), rgba(10, 10, 12, 0.9)), url('https://i.postimg.cc/Cx0pYgC2/photo-de-espcae-tudiant-africain.jpg');
-            background-size: cover; background-attachment: fixed; color: #fff; 
-        }
-        .glass { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
-        .neon-border { border: 1px solid #00f2ff; box-shadow: 0 0 15px rgba(0, 242, 255, 0.2); }
-        .card-hover:hover { transform: translateY(-5px); transition: 0.3s; border-color: #00f2ff; }
-    </style>
-</head>
-<body class="min-h-screen flex flex-col items-center justify-center p-6">
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+  <style>
+    body { 
+      background: #0a0a0b; color: white; font-family: 'Segoe UI', sans-serif; 
+      display: flex; justify-content: center; align-items: center; 
+      height: 100vh; margin: 0; overflow: hidden;
+    }
     
-    <div class="max-w-4xl w-full text-center mb-12">
-        <h1 class="text-5xl font-black tracking-tighter mb-2">DALL <span class="text-cyan-400">JAMM</span></h1>
-        <p class="text-gray-400">Vision Artificielle & Commerce Autonome</p>
-        
-        <div class="mt-8 flex justify-center items-center gap-4">
-            <input id="serverIp" type="text" placeholder="IP du Serveur (ex: 192.168.1.11)" 
-                   class="bg-gray-900 border border-gray-700 px-4 py-2 rounded-lg text-sm w-64 focus:outline-none focus:border-cyan-500">
-            <button onclick="saveIp()" class="bg-cyan-600 hover:bg-cyan-500 px-4 py-2 rounded-lg text-sm font-bold transition">CONNECTER</button>
-        </div>
+    .container { display: flex; gap: 40px; align-items: flex-start; padding: 20px; }
+
+    .card { 
+      width: 450px; padding: 40px; border-radius: 50px; 
+      text-align: center; border: 8px solid #f97316; 
+      background: #111114; box-shadow: 0 0 100px rgba(249, 115, 22, 0.1);
+      transition: all 0.3s ease;
+    }
+    
+    .history-panel {
+      width: 550px; background: #111114; border-radius: 30px;
+      border: 2px solid #222; padding: 25px; height: 600px;
+      display: flex; flex-direction: column;
+    }
+
+    .history-header { 
+      color: #f97316; font-weight: 900; font-size: 20px;
+      margin-bottom: 20px; text-transform: uppercase;
+      display: flex; justify-content: space-between;
+    }
+
+    .table-wrapper { overflow-y: auto; flex: 1; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; color: #444; font-size: 12px; padding: 10px; border-bottom: 1px solid #222; }
+    td { padding: 12px 10px; border-bottom: 1px solid #1a1a1e; font-size: 14px; font-weight: 600; }
+    
+    .brand { font-size: 28px; font-weight: 900; margin-bottom: 20px; letter-spacing: 2px; }
+    .brand span { color: #facc15; }
+
+    .photo-circle { 
+      width: 200px; height: 200px; border-radius: 50%; 
+      border: 6px solid #ffffff; margin: 0 auto 25px; 
+      overflow: hidden; background: #1a1a1c;
+      display: flex; align-items: center; justify-content: center;
+    }
+    img { width: 100%; height: 100%; object-fit: cover; }
+    
+    .status-badge { 
+      padding: 10px 25px; border-radius: 15px; 
+      font-weight: 900; font-size: 18px; color: #000; 
+      background: #facc15; display: inline-block; margin-bottom: 20px;
+    }
+
+    .user-name { font-size: 36px; font-weight: 900; margin: 0; color: #fff; text-transform: uppercase; }
+    .balance-tag { font-size: 28px; font-weight: 800; color: #22c55e; margin-top: 10px; }
+    
+    .access-granted { border-color: #22c55e !important; box-shadow: 0 0 100px rgba(34, 197, 94, 0.2); }
+    .access-denied { border-color: #ef4444 !important; box-shadow: 0 0 100px rgba(239, 68, 68, 0.2); }
+    
+    .status-text { font-size: 12px; padding: 4px 8px; border-radius: 4px; background: #222; }
+    .text-success { color: #22c55e; }
+    .text-danger { color: #ef4444; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- CARTE PRINCIPALE (DERNIER SCAN) -->
+    <div id="displayCard" class="card">
+      <div class="brand">JEL <span>DEM</span></div>
+      <div id="badge" class="status-badge"><i class="fas fa-fingerprint"></i> VEILLE</div>
+      <div class="photo-circle" id="userPhoto"><i class="fas fa-user-circle" style="font-size: 100px; color: #222;"></i></div>
+      <div id="userName" class="user-name">SCANNEZ SVP</div>
+      <div id="userBalance" class="balance-tag" style="display:none">0 FCFA</div>
     </div>
 
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full max-w-6xl">
-        
-        <!-- Admin Card -->
-        <a href="#" onclick="openModule('/admin')" class="glass p-8 rounded-2xl card-hover text-left">
-            <div class="text-cyan-400 text-3xl mb-4"><i class="fas fa-shield-halved"></i></div>
-            <h3 class="text-xl font-bold mb-2">Control Room</h3>
-            <p class="text-sm text-gray-500">Accès Admin, surveillance multi-caméras et export de données CSV.</p>
-        </a>
-
-        <!-- Mobile Cam -->
-        <a href="#" onclick="openModule('/mobile')" class="glass p-8 rounded-2xl card-hover text-left border-cyan-900">
-            <div class="text-cyan-400 text-3xl mb-4"><i class="fas fa-mobile-screen-button"></i></div>
-            <h3 class="text-xl font-bold mb-2">Mobile Camera</h3>
-            <p class="text-sm text-gray-500">Transformer ce smartphone en capteur IA pour le magasin.</p>
-        </a>
-
-        <!-- Wallet -->
-        <a href="#" onclick="openModule('/client')" class="glass p-8 rounded-2xl card-hover text-left">
-            <div class="text-cyan-400 text-3xl mb-4"><i class="fas fa-wallet"></i></div>
-            <h3 class="text-xl font-bold mb-2">Client Wallet</h3>
-            <p class="text-sm text-gray-500">Consulter le solde, l'historique des achats et le profil.</p>
-        </a>
-
-        <!-- Manager -->
-        <a href="#" onclick="openModule('/manager')" class="glass p-8 rounded-2xl card-hover text-left">
-            <div class="text-orange-500 text-3xl mb-4"><i class="fas fa-boxes-stacked"></i></div>
-            <h3 class="text-xl font-bold mb-2">Inventory Manager</h3>
-            <p class="text-sm text-gray-500">Gestion des stocks, prix et enregistrement 360° des produits.</p>
-        </a>
-
-        <!-- Registration -->
-        <a href="#" onclick="openModule('/register')" class="glass p-8 rounded-2xl card-hover text-left">
-            <div class="text-purple-500 text-3xl mb-4"><i class="fas fa-user-plus"></i></div>
-            <h3 class="text-xl font-bold mb-2">Face ID Setup</h3>
-            <p class="text-sm text-gray-500">Inscription biométrique multi-poses pour les nouveaux clients.</p>
-        </a>
-
-        <!-- API Docs -->
-        <a href="#" onclick="openModule('/docs')" class="glass p-8 rounded-2xl card-hover text-left opacity-50">
-            <div class="text-gray-400 text-3xl mb-4"><i class="fas fa-code"></i></div>
-            <h3 class="text-xl font-bold mb-2">API Reference</h3>
-            <p class="text-sm text-gray-500">Documentation technique Swagger pour les développeurs.</p>
-        </a>
-
+    <!-- PANNEAU HISTORIQUE LIVE -->
+    <div class="history-panel">
+      <div class="history-header">
+        <span><i class="fas fa-list-ul"></i> Live Feed</span>
+        <span id="liveClock" style="color:#555">--:--:--</span>
+      </div>
+      <div class="table-wrapper">
+        <table>
+          <thead><tr><th>HEURE</th><th>UTILISATEUR</th><th>ACTION / PRODUIT</th><th>MONTANT</th></tr></thead>
+          <tbody id="historyBody"></tbody>
+        </table>
+      </div>
     </div>
+  </div>
 
-    <footer class="mt-20 text-gray-600 text-xs uppercase tracking-widest">
-        Powered by Hyflex Vision Engine &copy; 2024
-    </footer>
+  <script>
+    let lastProcessedTime = "";
 
-    <script>
-        function saveIp() {
-            const ip = document.getElementById('serverIp').value;
-            if(!ip) return alert("Entrez une IP !");
-            localStorage.setItem('hyflex_server', ip);
-            alert("Serveur configuré : " + ip);
+    function refreshData() {
+      // Horloge
+      document.getElementById('liveClock').innerText = new Date().toLocaleTimeString();
+      
+      // 1. Mise à jour de la carte principale
+      google.script.run.withSuccessHandler(function(data) {
+        if (data.time !== lastProcessedTime) {
+          lastProcessedTime = data.time;
+          updateMainCard(data);
         }
+      }).getLastLog();
 
-        function openModule(path) {
-            let ip = localStorage.getItem('hyflex_server');
-            if(!ip) {
-                alert("Veuillez d'abord configurer l'IP du serveur en haut de la page.");
-                return;
-            }
-            // Ajoute le protocole si manquant
-            if(!ip.startsWith('http')) ip = 'https://' + ip;
-            if(!ip.includes(':8000') && !ip.includes('vercel') && !ip.includes('ngrok')) ip = ip + ':8000';
-            
-            window.location.href = ip + path;
-        }
+      // 2. Mise à jour de l'historique
+      google.script.run.withSuccessHandler(function(history) {
+        const tbody = document.getElementById('historyBody');
+        tbody.innerHTML = history.map(row => `
+          <tr>
+            <td style="color:#f97316">${row.time}</td>
+            <td>${row.name}</td>
+            <td><span class="status-text ${row.status.includes('REFUS') ? 'text-danger' : 'text-success'}">${row.status}</span></td>
+            <td style="color:#22c55e">${row.amount > 0 ? row.amount + ' F' : '-'}</td>
+          </tr>
+        `).join('');
+      }).getRecentLogs();
+    }
 
-        // Pré-remplissage
-        window.onload = () => {
-            const saved = localStorage.getItem('hyflex_server');
-            if(saved) document.getElementById('serverIp').value = saved;
-        }
-    </script>
+    function updateMainCard(data) {
+      const card = document.getElementById('displayCard');
+      const badge = document.getElementById('badge');
+      const photo = document.getElementById('userPhoto');
+      const name = document.getElementById('userName');
+      const balance = document.getElementById('userBalance');
+
+      name.innerText = data.name;
+      if (data.status.includes("ACCÈS") || data.status === "achat") {
+        card.className = "card access-granted";
+        badge.innerHTML = '<i class="fas fa-check-circle"></i> AUTORISÉ';
+        badge.style.background = "#22c55e";
+        balance.style.display = "block";
+        balance.innerText = data.balance.toLocaleString() + " FCFA";
+        photo.innerHTML = data.photo ? `<img src="${data.photo}">` : `<img src="https://api.qrserver.com/v1/create-qr-code/?data=${data.phone}&color=22c55e">`;
+      } else {
+        card.className = "card";
+        badge.innerHTML = '<i class="fas fa-fingerprint"></i> VEILLE';
+        badge.style.background = "#facc15";
+        balance.style.display = "none";
+        photo.innerHTML = '<i class="fas fa-user-circle" style="font-size: 100px; color: #222;"></i>';
+      }
+    }
+
+    setInterval(refreshData, 1000);
+  </script>
 </body>
 </html>
