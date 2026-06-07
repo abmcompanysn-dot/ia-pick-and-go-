@@ -1505,7 +1505,7 @@ async def get_active_cameras():
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_dashboard():
-    mobile_url = NGROK_URL if NGROK_URL else f"https://{LOCAL_IP}:8000/mobile"
+    mobile_url = (CLOUD_URL or NGROK_URL or f"https://{LOCAL_IP}:8000") + "/mobile"
     html = f"""
     <!DOCTYPE html>
     <html lang="fr">
@@ -2314,7 +2314,7 @@ async def mobile_interface():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Client - HYFLEX SHOP & GO</title>
+        <title>JEL DEM - SHOP & GO</title>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
         <style>
             body { margin: 0; background: #000; color: white; font-family: 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; }
@@ -2332,7 +2332,7 @@ async def mobile_interface():
     </head>
     <body>
         <div id="video-container">
-            <div id="brand-overlay">HYFLEX<br><span style="color:#00f2ff; font-size:0.8em;">SHOP & GO</span></div>
+            <div id="brand-overlay">JEL <span style="color:#f97316;">DEM</span><br><span style="color:#00f2ff; font-size:0.8em;">SHOP & GO</span></div>
             <video id="vid" autoplay playsinline muted></video>
             <div id="overlay">
                 <div id="status">Prêt</div>
