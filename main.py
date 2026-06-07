@@ -1635,7 +1635,30 @@ async def admin_dashboard():
         <div class="scenes-container" id="scenes-list">
             <div style='color:#666; padding: 20px;' id="waiting-msg">CHARGEMENT...</div>
         </div>
-        
+
+        <!-- PANNEAU PROFIL RFID (apparaît au scan) -->
+        <div id="rfid-panel" style="display:none; position:fixed; top:60px; right:20px; z-index:1000;
+             background:#1a1a2e; border:2px solid #00f2ff; border-radius:16px; padding:20px; width:230px;
+             box-shadow:0 0 30px rgba(0,242,255,0.4); animation:slideIn 0.3s ease;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <span style="color:#00f2ff; font-weight:bold; font-size:0.85em; letter-spacing:1px;">BADGE DETECTE</span>
+                <span onclick="document.getElementById('rfid-panel').style.display='none'"
+                      style="color:#666; cursor:pointer; font-size:1.2em;">✕</span>
+            </div>
+            <img id="rfid-photo" src="" width="80" height="80"
+                 style="border-radius:50%; border:2px solid #00f2ff; display:block; margin:0 auto 12px; object-fit:cover;">
+            <div id="rfid-name" style="text-align:center; font-size:1.1em; font-weight:bold; color:#fff; margin-bottom:4px;"></div>
+            <div id="rfid-uid" style="text-align:center; font-size:0.7em; color:#555; margin-bottom:12px;"></div>
+            <div style="background:#0d0d1a; border-radius:8px; padding:10px; text-align:center;">
+                <div style="color:#888; font-size:0.7em; margin-bottom:2px;">SOLDE WALLET</div>
+                <div id="rfid-balance" style="color:#00ff41; font-size:1.4em; font-weight:bold;"></div>
+            </div>
+            <div style="margin-top:10px; text-align:center;">
+                <span style="background:#00ff41; color:#000; padding:4px 12px; border-radius:20px;
+                      font-size:0.75em; font-weight:bold;">✓ ACCES AUTORISE</span>
+            </div>
+        </div>
+
         <script>
             const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxxSOZyptRBlGr0svsXlWzjANkMK8RRz03gVizG56nS6KsIfyVW0ghuyxonCY7ebqYGjQ/exec";
             let currentPayMode = 'test';
@@ -1895,6 +1918,27 @@ async def admin_dashboard():
             }}
             
             refreshLoop();
+
+            // ── POLLING RFID PROFIL (toutes les 2 secondes) ──
+            let lastRfidTs = 0;
+            async function pollRfid() {{
+                try {{
+                    const res = await fetch('/api/last_rfid_event');
+                    const ev = await res.json();
+                    if (ev.timestamp && ev.timestamp !== lastRfidTs && ev.user) {{
+                        lastRfidTs = ev.timestamp;
+                        document.getElementById('rfid-name').innerText = ev.user;
+                        document.getElementById('rfid-uid').innerText = 'UID: ' + ev.uid;
+                        document.getElementById('rfid-balance').innerText = ev.balance.toLocaleString() + ' FCFA';
+                        document.getElementById('rfid-photo').src = ev.photo_url || '';
+                        document.getElementById('rfid-panel').style.display = 'block';
+                        // Fermeture auto après 15 secondes
+                        setTimeout(() => {{ document.getElementById('rfid-panel').style.display = 'none'; }}, 15000);
+                    }}
+                }} catch(e) {{}}
+                setTimeout(pollRfid, 2000);
+            }}
+            pollRfid();
         </script>
     </body>
     </html>
@@ -2494,8 +2538,17 @@ if __name__ == "__main__":
 class RfidAuth(BaseModel):
     uid: str
 
+# Dernier événement RFID (pour affichage temps réel dans le dashboard)
+LAST_RFID_EVENT = {"uid": None, "user": None, "balance": 0, "photo_url": "", "timestamp": 0}
+
+@app.get("/api/last_rfid_event")
+async def get_last_rfid_event():
+    """Polling endpoint : le dashboard récupère le dernier scan RFID."""
+    return LAST_RFID_EVENT
+
 @app.post("/api/rfid_login")
 async def rfid_login(req: RfidAuth):
+    global LAST_RFID_EVENT
     uid = req.uid.strip().upper()
 
     # Réponse instantanée depuis le cache local
@@ -2505,16 +2558,37 @@ async def rfid_login(req: RfidAuth):
     for cam_id in list(LATEST_FRAME_BYTES.keys()):
         CAMERA_USER_ASSIGNMENTS[cam_id] = user_name
 
-    # Synchronisation Google en arrière-plan pour récupérer le vrai nom
+    # Mise à jour immédiate de l'événement RFID (dashboard polling)
+    LAST_RFID_EVENT = {
+        "uid": uid,
+        "user": user_name,
+        "balance": 0,
+        "photo_url": f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={uid}",
+        "timestamp": time.time()
+    }
+
+    # Synchronisation Google en arrière-plan pour récupérer le vrai profil
     def sync_and_update():
+        global LAST_RFID_EVENT
         try:
-            resp = requests.post(APPS_SCRIPT_URL, json={"action": "login", "uid": uid}, timeout=5)
+            resp = requests.post(APPS_SCRIPT_URL, json={
+                "action": "login",
+                "payload": {"rfidUid": uid}
+            }, timeout=8)
             data = resp.json()
-            real_name = data.get("name") or data.get("user")
-            if real_name:
+            if data.get("success") and data.get("user_data"):
+                ud = data["user_data"]
+                real_name = ud.get("name", user_name)
                 RFID_USER_CACHE[uid] = real_name
                 for cam_id in list(LATEST_FRAME_BYTES.keys()):
                     CAMERA_USER_ASSIGNMENTS[cam_id] = real_name
+                LAST_RFID_EVENT = {
+                    "uid": uid,
+                    "user": real_name,
+                    "balance": ud.get("balance", 0),
+                    "photo_url": ud.get("photo_url", f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={uid}"),
+                    "timestamp": time.time()
+                }
         except Exception:
             pass
     threading.Thread(target=sync_and_update, daemon=True).start()
