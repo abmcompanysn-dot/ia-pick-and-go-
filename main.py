@@ -63,10 +63,14 @@ DB_PRODUITS = {}
 
 # --- GESTION ASSIGNATION MANUELLE (ALTERNATIVE À LA RECO FACIALE) ---
 # Permet à l'admin de dire "C'est Thomas devant la caméra 1"
-CAMERA_USER_ASSIGNMENTS = {} 
+CAMERA_USER_ASSIGNMENTS = {}
+
+# Cache local UID RFID → nom utilisateur (évite de recontacter Google à chaque scan)
+RFID_USER_CACHE = {}
 
 # --- GESTION WALLET (PORTEFEUILLE) ---
 WALLET_FILE = "wallets.json"
+WALLETS_LOCK = threading.Lock()
 
 def load_wallets():
     if os.path.exists(WALLET_FILE):
@@ -75,8 +79,9 @@ def load_wallets():
     return {"Client_Unknown": 5000}
 
 def save_wallets():
-    with open(WALLET_FILE, "w") as f:
-        json.dump(WALLETS, f, indent=4)
+    with WALLETS_LOCK:
+        with open(WALLET_FILE, "w") as f:
+            json.dump(WALLETS, f, indent=4)
 
 WALLETS = load_wallets() # Chargement au démarrage
 
@@ -90,35 +95,54 @@ except ImportError:
 
 NGROK_URL = None
 
+# Détection automatique du mode cloud (Railway, Render, etc.)
+# Railway injecte RAILWAY_PUBLIC_DOMAIN, Render injecte RENDER_EXTERNAL_URL
+def get_cloud_url():
+    railway = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+    if railway:
+        return f"https://{railway}"
+    render = os.getenv("RENDER_EXTERNAL_URL")
+    if render:
+        return render.rstrip("/")
+    return None
+
+CLOUD_URL = get_cloud_url()
+IS_CLOUD = CLOUD_URL is not None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global NGROK_URL
-    # Démarrage automatique de Ngrok si le jeton est présent
-    auth_token = os.getenv("NGROK_AUTH_TOKEN")
-    if PYNGROK_AVAILABLE and auth_token:
-        try:
-            ngrok.set_auth_token(auth_token)
-            # On crée un tunnel vers notre serveur HTTPS local (port 8000)
-            # Ngrok gère la redirection sécurisée vers votre localhost
-            tunnel = ngrok.connect(8000, bind_tls=True)
-            NGROK_URL = tunnel.public_url
-            print(f"\n" + "═"*60)
-            print(f"🌍 URL PUBLIQUE NGROK : {NGROK_URL}")
-            print(f"📱 Accès mobile : {NGROK_URL}/mobile")
-            print("═"*60 + "\n")
-            
-            # Synchronisation automatique de l'URL avec Google Sheets
-            def sync_ngrok_url():
-                try:
-                    requests.post(APPS_SCRIPT_URL, json={
-                        "action": "updatePythonUrl",
-                        "payload": {"pythonUrl": NGROK_URL}
-                    }, timeout=5)
-                    print("✅ URL Ngrok synchronisée avec Google Sheets.")
-                except: pass
-            threading.Thread(target=sync_ngrok_url, daemon=True).start()
-        except Exception as e:
-            print(f"⚠️ Erreur Ngrok : {e}")
+
+    public_url = CLOUD_URL  # Priorité à l'URL cloud si disponible
+
+    # Ngrok uniquement en local (pas besoin sur Railway/Render qui ont leur propre URL)
+    if not IS_CLOUD:
+        auth_token = os.getenv("NGROK_AUTH_TOKEN")
+        if PYNGROK_AVAILABLE and auth_token:
+            try:
+                ngrok.set_auth_token(auth_token)
+                tunnel = ngrok.connect(8000, bind_tls=True)
+                NGROK_URL = tunnel.public_url
+                public_url = NGROK_URL
+                print(f"\n" + "═"*60)
+                print(f"URL PUBLIQUE NGROK : {NGROK_URL}")
+                print(f"Acces mobile : {NGROK_URL}/mobile")
+                print("═"*60 + "\n")
+            except Exception as e:
+                print(f"Erreur Ngrok : {e}")
+
+    if public_url:
+        # Synchronisation automatique de l'URL publique avec Google Sheets
+        def sync_public_url():
+            try:
+                requests.post(APPS_SCRIPT_URL, json={
+                    "action": "updatePythonUrl",
+                    "payload": {"pythonUrl": public_url}
+                }, timeout=5)
+                print(f"URL publique synchronisee avec Google Sheets : {public_url}")
+            except Exception:
+                pass
+        threading.Thread(target=sync_public_url, daemon=True).start()
 
     # Lance la boucle d'analyse IA en arrière-plan
     t = threading.Thread(target=background_analysis_loop, daemon=True)
@@ -2422,75 +2446,108 @@ if __name__ == "__main__":
     import uvicorn
     import sys
 
-    # Vérification de la dépendance critique pour les WebSockets
-    try:
-        import websockets
-    except ImportError:
-        print("\n❌ ERREUR CRITIQUE : La librairie 'websockets' est manquante.")
-        print("👉 Veuillez l'installer avec la commande : pip install websockets\n")
+    # Vérification des dépendances critiques
+    missing = []
+    for pkg in ["websockets", "cv2", "mediapipe", "ultralytics"]:
+        try:
+            __import__(pkg)
+        except ImportError:
+            missing.append(pkg)
+    if missing:
+        print(f"\n ERREUR : Packages manquants : {', '.join(missing)}")
+        print(f"   Installez avec : pip install -r requirements.txt\n")
         sys.exit(1)
 
-    IP = LOCAL_IP
+    # PORT : Railway/Render injectent leur propre PORT, en local on utilise 8000
+    PORT = int(os.getenv("PORT", 8000))
+
+    # SSL : uniquement en local si key.pem et cert.pem existent
+    USE_SSL = not IS_CLOUD and os.path.exists("key.pem") and os.path.exists("cert.pem")
+
+    base_url = CLOUD_URL or (f"https://{LOCAL_IP}:{PORT}" if USE_SSL else f"http://{LOCAL_IP}:{PORT}")
+
     print(f"\n" + "="*60)
-    print(f"🚀 LE SERVEUR EST EN LIGNE (SSL ACTIF)")
-    print(f"="*60)
-    print(f"👉 Lien à utiliser : https://{IP}:8000")
-
-    if qrcode:
-        print(f"\n📱 SCANNEZ CE CODE POUR CONNECTER VOTRE MOBILE :")
-        qr = qrcode.QRCode(version=1, border=2)
-        qr_data = f"{NGROK_URL}/mobile" if NGROK_URL else f"https://{IP}:8000/mobile"
-        qr.add_data(qr_data)
-        qr.print_ascii(invert=True)
+    if IS_CLOUD:
+        print(f" DALL JAMM EN LIGNE - MODE CLOUD")
     else:
-        print(f"\n📱 LIEN MOBILE : {NGROK_URL if NGROK_URL else f'https://{IP}:8000/mobile'} (Installez 'qrcode' pour voir le flashcode ici)")
+        print(f" DALL JAMM EN LIGNE - MODE LOCAL {'(SSL)' if USE_SSL else ''}")
+    print(f"="*60)
+    print(f" URL principale : {base_url}")
+    print(f" Admin          : {base_url}/admin")
+    print(f" Client         : {base_url}/client")
+    print(f" Manager        : {base_url}/manager")
 
-    print(f"\n⚠️  ALERTE SÉCURITÉ NAVIGATEUR (IMPORTANT) :")
-    print(f"   1. Vous verrez un écran rouge 'Votre connexion n'est pas privée'.")
-    print(f"   2. Cliquez sur 'Paramètres avancés' (Advanced).")
-    print(f"   3. Cliquez sur 'Continuer vers {IP} (dangereux)'.")
+    if not IS_CLOUD and qrcode:
+        print(f"\n SCANNEZ CE CODE POUR CONNECTER VOTRE MOBILE :")
+        qr = qrcode.QRCode(version=1, border=2)
+        qr.add_data(f"{base_url}/mobile")
+        qr.print_ascii(invert=True)
+
+    if USE_SSL:
+        print(f"\n  NAVIGATEUR : cliquez 'Parametres avances' puis 'Continuer' si Chrome bloque.")
     print(f"="*60 + "\n")
+
+    ssl_kwargs = {"ssl_keyfile": "key.pem", "ssl_certfile": "cert.pem"} if USE_SSL else {}
+    uvicorn.run(app, host="0.0.0.0", port=PORT, **ssl_kwargs)
 class RfidAuth(BaseModel):
     uid: str
 
 @app.post("/api/rfid_login")
 async def rfid_login(req: RfidAuth):
-    # AUTHENTIFICATION INSTANTANÉE (Zéro délai)
-    user_name = "Client_Premium" 
-    
-    # On assigne l'utilisateur aux caméras immédiatement en local
+    uid = req.uid.strip().upper()
+
+    # Réponse instantanée depuis le cache local
+    user_name = RFID_USER_CACHE.get(uid, f"Badge_{uid[-4:] if len(uid) >= 4 else uid}")
+
+    # Assigner immédiatement à toutes les caméras actives
     for cam_id in list(LATEST_FRAME_BYTES.keys()):
         CAMERA_USER_ASSIGNMENTS[cam_id] = user_name
-        
-    # On lance la synchro Google en arrière-plan sans attendre la réponse
-    threading.Thread(target=lambda: requests.post(APPS_SCRIPT_URL, json={"action":"login", "uid":req.uid}), daemon=True).start()
-    
+
+    # Synchronisation Google en arrière-plan pour récupérer le vrai nom
+    def sync_and_update():
+        try:
+            resp = requests.post(APPS_SCRIPT_URL, json={"action": "login", "uid": uid}, timeout=5)
+            data = resp.json()
+            real_name = data.get("name") or data.get("user")
+            if real_name:
+                RFID_USER_CACHE[uid] = real_name
+                for cam_id in list(LATEST_FRAME_BYTES.keys()):
+                    CAMERA_USER_ASSIGNMENTS[cam_id] = real_name
+        except Exception:
+            pass
+    threading.Thread(target=sync_and_update, daemon=True).start()
+
     return {"status": "success", "authorized": True, "user": user_name}
+
+@app.get("/api/rfid_cache")
+async def get_rfid_cache():
+    """Retourne le cache local des badges RFID connus (pour diagnostic)."""
+    return RFID_USER_CACHE
 
 @app.get("/api/users_list")
 async def get_users_list():
-    """Récupère la liste des utilisateurs pour le manager."""
+    """Récupère la liste des utilisateurs pour le manager (non-bloquant)."""
+    loop = asyncio.get_event_loop()
     try:
-        resp = requests.post(APPS_SCRIPT_URL, json={"action": "getUsers"})
+        resp = await loop.run_in_executor(
+            None,
+            lambda: requests.post(APPS_SCRIPT_URL, json={"action": "getUsers"}, timeout=8)
+        )
         return resp.json()
-    except:
-        # Fallback local basé sur les Wallets si Google est lent
+    except Exception:
         return [{"name": k, "phone": "---"} for k in WALLETS.keys()]
 
 @app.post("/api/assign_badge")
 async def assign_badge(phone: str = Form(...), rfid_uid: str = Form(...)):
     """Assigne un UID RFID à un utilisateur via son téléphone."""
-    payload = {
-        "action": "assignRfid",
-        "payload": {"phone": phone, "rfidUid": rfid_uid}
-    }
+    uid = rfid_uid.strip().upper()
+    payload = {"action": "assignRfid", "payload": {"phone": phone, "rfidUid": uid}}
+    loop = asyncio.get_event_loop()
     try:
-        resp = requests.post(APPS_SCRIPT_URL, json=payload)
+        resp = await loop.run_in_executor(
+            None,
+            lambda: requests.post(APPS_SCRIPT_URL, json=payload, timeout=8)
+        )
         return {"status": "success"} if resp.status_code == 200 else {"status": "error"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-
-if __name__ == "__main__":
-    import uvicorn
-    # ... (les prints de démarrage existants) ...
-    uvicorn.run(app, host="0.0.0.0", port=8000, ssl_keyfile="key.pem", ssl_certfile="cert.pem")

@@ -1,6 +1,40 @@
+# ==========================================
+# JEL DEM / DALL JAMM - Dépendances Python
+# Installer avec : pip install -r requirements.txt
+# ==========================================
+
+# --- Serveur Web ---
 fastapi
-uvicorn
-groq
-pandas
-pydantic
+uvicorn[standard]
 python-multipart
+websockets
+
+# --- Vision IA ---
+opencv-python
+mediapipe
+ultralytics
+numpy
+Pillow
+
+# --- IA & API ---
+groq
+pydantic
+
+# --- HTTP & Réseau ---
+requests
+httpx
+
+# --- Données ---
+pandas
+python-dotenv
+
+# --- Outils optionnels (recommandés) ---
+qrcode[pil]       # QR code dans le terminal
+pyngrok           # Tunnel internet gratuit
+cryptography      # Génération certificats SSL
+
+# --- Reconnaissance faciale (optionnel, plus complexe à installer) ---
+# face_recognition  # Nécessite : pip install cmake dlib face_recognition
+
+# --- Lecteur RFID Windows USB ---
+pynput            # Capture clavier pour lecteur RFID HID

@@ -1,0 +1,10 @@
+path: ./dataset
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 3
+names:
+  - Malta
+  - Malta bouteille
+  - Seo 350 ml

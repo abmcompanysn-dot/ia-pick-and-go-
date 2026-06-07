@@ -1,0 +1,40 @@
+# ==========================================
+# JEL DEM / DALL JAMM - Fichiers à ignorer
+# ==========================================
+
+# --- SÉCURITÉ CRITIQUE (ne jamais committer) ---
+.env
+key.pem
+cert.pem
+
+# --- Données dynamiques (trop lourdes / changent souvent) ---
+transactions_history.json
+wallets.json
+products_index.pkl
+vue_camera.jpg
+
+# --- Modèles IA (yolov8n.pt auto-téléchargé par ultralytics, best.pt inclus dans le repo) ---
+yolov8n.pt
+runs/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
