@@ -219,9 +219,11 @@ except Exception as e:
     mp_pose = None
     mp_drawing = None
 
-client = Groq( # Initialisation du client Groq
-    api_key=os.getenv("GROQ_API_KEY"),
-)
+try:
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+except Exception as e:
+    print(f"⚠️ Groq non initialisé (GROQ_API_KEY manquante?) : {e}")
+    client = None
 
 # --- MÉMOIRE DES CAMÉRAS (POUR LE DASHBOARD ADMIN) ---
 # Stocke la dernière image traitée et les infos pour chaque caméra
