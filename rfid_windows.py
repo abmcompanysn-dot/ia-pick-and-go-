@@ -24,8 +24,8 @@ from pynput import keyboard
 # ──────────────────────────────────────────────
 # CONFIGURATION — à modifier selon votre setup
 # ──────────────────────────────────────────────
-SERVER_URL = "https://127.0.0.1:8000/api/rfid_login"  # URL du serveur JEL DEM
-SSL_VERIFY = False          # False = accepte le certificat auto-signé
+SERVER_URL = "https://ia-pick-and-go.onrender.com/api/rfid_login"  # URL du serveur JEL DEM
+SSL_VERIFY = True           # True = Render a un vrai certificat SSL
 SCAN_TIMEOUT = 0.15         # secondes entre 2 touches → fin de scan si dépassé
 MIN_UID_LEN = 4             # longueur minimale d'un UID valide
 # ──────────────────────────────────────────────
