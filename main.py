@@ -121,15 +121,21 @@ async def lifespan(app: FastAPI):
         if PYNGROK_AVAILABLE and auth_token:
             try:
                 ngrok.set_auth_token(auth_token)
-                tunnel = ngrok.connect(8000, bind_tls=True)
-                NGROK_URL = tunnel.public_url
+                # Compatibilité pyngrok v4 et v5+
+                try:
+                    tunnel = ngrok.connect(8000, proto="http")
+                except TypeError:
+                    tunnel = ngrok.connect(8000)
+                url = tunnel.public_url
+                # Forcer HTTPS
+                NGROK_URL = url.replace("http://", "https://") if url.startswith("http://") else url
                 public_url = NGROK_URL
                 print(f"\n" + "═"*60)
                 print(f"URL PUBLIQUE NGROK : {NGROK_URL}")
                 print(f"Acces mobile : {NGROK_URL}/mobile")
                 print("═"*60 + "\n")
             except Exception as e:
-                print(f"Erreur Ngrok : {e}")
+                print(f"Ngrok non disponible (mode local sans tunnel) : {e}")
 
     if public_url:
         # Synchronisation automatique de l'URL publique avec Google Sheets
