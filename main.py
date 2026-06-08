@@ -178,21 +178,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CHARGEMENT DU MODÈLE YOLO (Le Cerveau) ---
+# --- CHARGEMENT DES MODÈLES IA ---
+# Modèle principal : détection produits + personnes
 try:
-    # Tente de charger votre modèle entraîné, sinon prend le modèle standard
-    # On essaie d'utiliser CUDA (GPU) pour une puissance maximale
-    if os.path.exists("best.pt"):
-        MODEL = YOLO("best.pt")
-    else:
-        MODEL = YOLO("yolov8n.pt") # Modèle léger par défaut
-
-    # Force le modèle sur GPU si disponible pour la "bonne puissance"
-    MODEL.to('cuda') if hasattr(MODEL, 'to') else print("Running on CPU")
-    print(f"IA prete. Mode: {'GPU (Puissance Max)' if 'cuda' in str(MODEL.device) else 'CPU (Mode lent)'}")
+    MODEL = YOLO("best.pt") if os.path.exists("best.pt") else YOLO("yolov8n.pt")
+    print(f"Modele principal pret : {'best.pt' if os.path.exists('best.pt') else 'yolov8n.pt'}")
 except Exception as e:
     MODEL = None
-    print(f"Erreur chargement YOLO: {e}")
+    print(f"Erreur YOLO principal: {e}")
+
+# Modèle pose : squelette corporel en violet (remplace MediaPipe Pose)
+try:
+    POSE_MODEL = YOLO("yolov8n-pose.pt")
+    print("Modele YOLO Pose pret (squelette violet)")
+except Exception as e:
+    POSE_MODEL = None
+    print(f"YOLO Pose non disponible: {e}")
+
+# Détection de visage OpenCV (rapide, fonctionne sans GPU)
+try:
+    FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    print("Detecteur visage OpenCV pret")
+except Exception as e:
+    FACE_CASCADE = None
+    print(f"Cascade visage non disponible: {e}")
 
 # --- CONFIGURATION MEDIAPIPE (MAINS) ---
 try:
@@ -1104,15 +1113,40 @@ def process_pick_and_go_logic(camera_id, img):
     detections_to_draw = []
     person_count = 0
 
-    # --- ÉTAPE 1.5 : DÉTECTION DU CORPS ENTIER (MediaPipe Pose) ---
+    # --- ÉTAPE 1.5 : SQUELETTE YOLO POSE (violet) + VISAGES OpenCV ---
     pose_landmarks = None
-    if POSE_DETECTOR:
-        pose_results = POSE_DETECTOR.process(img_cv)
-        if pose_results.pose_landmarks:
-            pose_landmarks = pose_results.pose_landmarks
+
+    # YOLO Pose → squelette violet
+    if POSE_MODEL:
+        try:
+            pose_res = POSE_MODEL(img_cv, verbose=False, conf=0.5)[0]
+            if pose_res.keypoints is not None:
+                kpts_all = pose_res.keypoints.data.cpu().numpy()  # (N, 17, 3)
+                for kpts in kpts_all:
+                    # Normaliser les coordonnées (YOLO donne les coords en pixels)
+                    kpts_norm = [(kx / width, ky / height, kc) for kx, ky, kc in kpts]
+                    detections_to_draw.append({"type": "pose", "keypoints": kpts_norm})
+        except Exception:
+            pass
+
+    # OpenCV Haar → visage + nom
+    if FACE_CASCADE is not None:
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
+        faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40,40))
+        for (fx, fy, fw, fh) in faces:
+            # Chercher le nom assigné à cette caméra (RFID ou manuel)
+            assigned = CAMERA_USER_ASSIGNMENTS.get(camera_id, "")
+            # Chercher dans la mémoire de tracking si quelqu'un est identifié
+            person_name = assigned or "Visiteur"
+            if camera_id in PERSON_TRACK_MEMORY:
+                for tid_name in PERSON_TRACK_MEMORY[camera_id].values():
+                    if tid_name and tid_name != "Client_Unknown":
+                        person_name = tid_name
+                        break
             detections_to_draw.append({
-                "type": "pose",
-                "landmarks": pose_landmarks
+                "type": "face",
+                "box": (fx, fy, fx+fw, fy+fh),
+                "name": person_name
             })
     
     # --- ÉTAPE 1 : TRACKING YOLO ---
@@ -1432,36 +1466,40 @@ def draw_hud(img, detections):
                         draw.line([points[start_idx], points[end_idx]], fill="white", width=2)
         
         elif det['type'] == 'pose':
-            # Dessiner le squelette complet du corps (Toutes les parties du corps)
-            if mp_pose:
-                lms = det['landmarks']
-                width, height = img.size
-                points = {}
-                for idx, lm in enumerate(lms.landmark):
-                    if lm.visibility > 0.5: # On ne dessine que les parties visibles
-                        px, py = int(lm.x * width), int(lm.y * height)
-                        points[idx] = (px, py)
-                        draw.ellipse([px-4, py-4, px+4, py+4], fill="#ff00f2") # Rose néon
-                
-                for start_idx, end_idx in mp_pose.POSE_CONNECTIONS:
-                    if start_idx in points and end_idx in points:
-                        draw.line([points[start_idx], points[end_idx]], fill="white", width=2)
-        
-        elif det['type'] == 'pose':
-            # Dessiner le squelette complet du corps (Toutes les parties du corps)
-            if mp_pose:
-                lms = det['landmarks']
-                width, height = img.size
-                points = {}
-                for idx, lm in enumerate(lms.landmark):
-                    if lm.visibility > 0.5: # On ne dessine que les parties visibles
-                        px, py = int(lm.x * width), int(lm.y * height)
-                        points[idx] = (px, py)
-                        draw.ellipse([px-4, py-4, px+4, py+4], fill="#ff00f2") # Rose néon
-                
-                for start_idx, end_idx in mp_pose.POSE_CONNECTIONS:
-                    if start_idx in points and end_idx in points:
-                        draw.line([points[start_idx], points[end_idx]], fill="white", width=2)
+            # Squelette YOLO Pose en VIOLET
+            kpts = det.get('keypoints')  # shape (17, 3) : x, y, conf
+            if kpts is not None:
+                w, h = img.size
+                # Connexions standard COCO 17 keypoints
+                SKELETON = [
+                    (0,1),(0,2),(1,3),(2,4),          # tête
+                    (5,6),(5,7),(7,9),(6,8),(8,10),    # bras
+                    (5,11),(6,12),(11,12),              # torse
+                    (11,13),(13,15),(12,14),(14,16)     # jambes
+                ]
+                pts = {}
+                for i, (kx, ky, kc) in enumerate(kpts):
+                    if kc > 0.4:
+                        px, py = int(kx * w), int(ky * h)
+                        pts[i] = (px, py)
+                        draw.ellipse([px-5, py-5, px+5, py+5], fill="#9b30ff")
+                for (a, b) in SKELETON:
+                    if a in pts and b in pts:
+                        draw.line([pts[a], pts[b]], fill="#cc66ff", width=3)
+
+        elif det['type'] == 'face':
+            # Rectangle VISAGE + NOM en CYAN
+            x1, y1, x2, y2 = det['box']
+            name = det.get('name', 'Inconnu')
+            draw.rectangle([x1, y1, x2, y2], outline="#00ffcc", width=3)
+            # Coins renforcés
+            cl = min(20, (x2-x1)//4)
+            for (cx, cy, dx, dy) in [(x1,y1,1,1),(x2,y1,-1,1),(x1,y2,1,-1),(x2,y2,-1,-1)]:
+                draw.line([(cx,cy),(cx+dx*cl,cy)], fill="#00ffcc", width=4)
+                draw.line([(cx,cy),(cx,cy+dy*cl)], fill="#00ffcc", width=4)
+            # Étiquette nom
+            draw.rectangle([x1, y1-24, x1+len(name)*10+12, y1], fill=(0,0,0,200))
+            draw.text((x1+6, y1-22), name.upper(), fill="#00ffcc", font=font)
 
         elif det['type'] == 'path':
             # Dessine la trajectoire du geste
@@ -1620,7 +1658,10 @@ async def admin_dashboard():
                 <div class="panel-box">
                     <div class="panel-title">ACCÈS RAPIDES</div>
                     <a href="/manager" style="color: #ff9900; text-decoration: none; display:block; padding:5px; border-bottom:1px solid #333;">MANAGER</a>
-                    <a href="/client" style="color: #00f2ff; text-decoration: none; display:block; padding:5px;">CLIENT WALLET</a>
+                    <a href="/client" style="color: #00f2ff; text-decoration: none; display:block; padding:5px; border-bottom:1px solid #333;">CLIENT WALLET</a>
+                    <button onclick="syncProducts()" style="width:100%; margin-top:6px; background:#1a3a1a; color:#00ff41; border:1px solid #00ff41; padding:5px; cursor:pointer; font-size:0.7em; border-radius:3px;">🔄 SYNC PRODUITS</button>
+                    <button onclick="launchTraining()" style="width:100%; margin-top:4px; background:#1a1a3a; color:#9b30ff; border:1px solid #9b30ff; padding:5px; cursor:pointer; font-size:0.7em; border-radius:3px;">🧠 ENTRAÎNER L'IA</button>
+                    <div id="train-status" style="font-size:0.65em; color:#666; text-align:center; margin-top:4px;"></div>
                 </div>
 
                 <div class="panel-box">
@@ -1676,6 +1717,35 @@ async def admin_dashboard():
 
         <script>
             const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxxSOZyptRBlGr0svsXlWzjANkMK8RRz03gVizG56nS6KsIfyVW0ghuyxonCY7ebqYGjQ/exec";
+
+            async function syncProducts() {{
+                const btn = event.target;
+                btn.textContent = '⏳ SYNC...';
+                try {{
+                    const r = await fetch('/api/sync_products', {{method:'POST'}});
+                    const d = await r.json();
+                    btn.textContent = `✅ ${{d.count || 0}} PRODUITS`;
+                    setTimeout(() => btn.textContent = '🔄 SYNC PRODUITS', 3000);
+                }} catch(e) {{
+                    btn.textContent = '❌ ERREUR';
+                    setTimeout(() => btn.textContent = '🔄 SYNC PRODUITS', 3000);
+                }}
+            }}
+
+            async function launchTraining() {{
+                const status = document.getElementById('train-status');
+                status.style.color = '#9b30ff';
+                status.textContent = '⏳ Entraînement en cours...';
+                try {{
+                    const r = await fetch('/api/train', {{method:'POST'}});
+                    const d = await r.json();
+                    status.style.color = '#00ff41';
+                    status.textContent = d.message || 'Terminé';
+                }} catch(e) {{
+                    status.style.color = '#ff3333';
+                    status.textContent = 'Erreur entraînement';
+                }}
+            }}
             let currentPayMode = 'test';
 
             // Charger les paramètres au démarrage
@@ -2669,6 +2739,40 @@ async def rfid_login(req: RfidAuth):
 async def get_rfid_cache():
     """Retourne le cache local des badges RFID connus (pour diagnostic)."""
     return RFID_USER_CACHE
+
+@app.post("/api/sync_products")
+async def sync_products():
+    """Synchronise les produits depuis Google Sheets."""
+    global DB_PRODUITS
+    loop = asyncio.get_event_loop()
+    try:
+        resp = await loop.run_in_executor(
+            None,
+            lambda: requests.post(APPS_SCRIPT_URL, json={"action": "getProducts"}, timeout=10)
+        )
+        data = resp.json()
+        if isinstance(data, dict):
+            DB_PRODUITS = {k.lower(): v for k, v in data.items()}
+            return {"status": "ok", "count": len(DB_PRODUITS), "products": DB_PRODUITS}
+        return {"status": "error", "count": 0}
+    except Exception as e:
+        return {"status": "error", "detail": str(e), "count": 0}
+
+@app.post("/api/train")
+async def launch_training():
+    """Lance l'entraînement YOLO en arrière-plan."""
+    import subprocess, sys
+    if not os.path.exists("dataset/data.yaml"):
+        return {"message": "❌ Pas de dataset. Ajoutez des images dans dataset/"}
+    def run_training():
+        try:
+            subprocess.run([sys.executable, "-m", "ultralytics", "train",
+                           "data=dataset/data.yaml", "model=yolov8n.pt",
+                           "epochs=30", "imgsz=640", "batch=8"], check=True)
+        except Exception as e:
+            print(f"Erreur entraînement : {e}")
+    threading.Thread(target=run_training, daemon=True).start()
+    return {"message": "🧠 Entraînement lancé en arrière-plan (30 epochs). Résultat dans runs/detect/"}
 
 @app.get("/api/users_list")
 async def get_users_list():
