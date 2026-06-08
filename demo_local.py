@@ -231,13 +231,18 @@ def main():
     print("  [Q] = Quitter")
     print("="*55 + "\n")
 
-    cap = cv2.VideoCapture(CAMERA_INDEX)
+    # Essai avec DirectShow (plus compatible Windows)
+    cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+    if not cap.isOpened() or not cap.read()[0]:
+        print("DirectShow échoué, essai caméra 1...")
+        cap.release()
+        cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        print(f"ERREUR : Aucune caméra trouvée. Branchez une webcam USB.")
+        return
+
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
-    if not cap.isOpened():
-        print(f"ERREUR : Impossible d'ouvrir la caméra {CAMERA_INDEX}")
-        return
 
     cv2.namedWindow("JEL DEM - Pick & Go", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("JEL DEM - Pick & Go", 1280, 720)
