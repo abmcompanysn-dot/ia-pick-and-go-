@@ -1628,6 +1628,21 @@ async def admin_dashboard():
                     <div class="qr-side"><img src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data={mobile_url}" width="120"></div>
                     <p style="font-size:0.7em; color:#888; text-align:center; margin-top:5px;">Scannez pour ajouter une caméra</p>
                 </div>
+
+                <div class="panel-box" id="rfid-scanner-box" style="border:2px solid #333; transition:border-color 0.3s;">
+                    <div class="panel-title">LECTEUR RFID USB</div>
+                    <div style="text-align:center; padding:10px 0;">
+                        <div id="rfid-icon" style="font-size:2.5em; margin-bottom:8px;">📡</div>
+                        <div id="rfid-status-text" style="color:#555; font-size:0.75em; letter-spacing:1px;">EN ATTENTE...</div>
+                        <div id="rfid-last-uid" style="color:#333; font-size:0.65em; margin-top:6px;"></div>
+                    </div>
+                    <div style="background:#0a0a0a; border-radius:8px; padding:8px; margin-top:8px;">
+                        <input id="rfid-manual-input" type="text" placeholder="Ou saisissez l'UID manuellement..."
+                               style="width:100%; background:transparent; border:none; color:#888; font-size:0.75em;
+                                      outline:none; text-align:center; box-sizing:border-box;"
+                               onkeypress="if(event.key==='Enter'){{manualRfid(this.value);this.value='';}}" />
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -1920,34 +1935,56 @@ async def admin_dashboard():
             refreshLoop();
 
             // ── CAPTURE RFID DIRECTE DEPUIS LE NAVIGATEUR ──
-            // Le lecteur RFID USB tape le code très vite puis appuie sur Entrée
-            // On capture ces frappes globalement, même si aucun input n'est focalisé
             let rfidBuffer = '';
             let rfidTimer = null;
+
+            function sendRfidUid(uid) {{
+                const box = document.getElementById('rfid-scanner-box');
+                const icon = document.getElementById('rfid-icon');
+                const txt = document.getElementById('rfid-status-text');
+                const uidTxt = document.getElementById('rfid-last-uid');
+                // Animation scan
+                box.style.borderColor = '#00f2ff';
+                box.style.boxShadow = '0 0 20px rgba(0,242,255,0.5)';
+                icon.innerText = '✅';
+                txt.style.color = '#00f2ff';
+                txt.innerText = 'CARTE DETECTEE';
+                uidTxt.style.color = '#00f2ff';
+                uidTxt.innerText = 'UID: ' + uid;
+                // Envoyer au serveur
+                fetch('/api/rfid_login', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{uid: uid}})
+                }}).then(r => r.json()).then(data => {{
+                    txt.innerText = data.user ? '✓ ' + data.user.toUpperCase() : 'ACCES AUTORISE';
+                }});
+                // Reset après 5s
+                setTimeout(() => {{
+                    box.style.borderColor = '#333';
+                    box.style.boxShadow = 'none';
+                    icon.innerText = '📡';
+                    txt.style.color = '#555';
+                    txt.innerText = 'EN ATTENTE...';
+                    uidTxt.style.color = '#333';
+                }}, 5000);
+            }}
+
+            function manualRfid(uid) {{
+                uid = uid.trim().toUpperCase();
+                if (uid.length >= 4) sendRfidUid(uid);
+            }}
+
             document.addEventListener('keypress', function(e) {{
-                // Ignorer si l'utilisateur tape dans un vrai champ texte
                 const tag = document.activeElement.tagName;
                 if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-
                 if (e.key === 'Enter') {{
-                    if (rfidBuffer.length >= 4) {{
-                        const uid = rfidBuffer.trim().toUpperCase();
-                        rfidBuffer = '';
-                        clearTimeout(rfidTimer);
-                        // Envoyer l'UID au serveur
-                        fetch('/api/rfid_login', {{
-                            method: 'POST',
-                            headers: {{'Content-Type': 'application/json'}},
-                            body: JSON.stringify({{uid: uid}})
-                        }}).then(r => r.json()).then(data => {{
-                            console.log('RFID scan:', uid, data);
-                        }});
-                    }}
+                    if (rfidBuffer.length >= 4) sendRfidUid(rfidBuffer.trim().toUpperCase());
                     rfidBuffer = '';
+                    clearTimeout(rfidTimer);
                 }} else {{
                     rfidBuffer += e.key;
                     clearTimeout(rfidTimer);
-                    // Si aucun Entrée après 300ms → reset (protection contre frappe humaine)
                     rfidTimer = setTimeout(() => {{ rfidBuffer = ''; }}, 300);
                 }}
             }});
