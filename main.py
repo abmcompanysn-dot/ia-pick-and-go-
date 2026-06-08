@@ -1919,6 +1919,39 @@ async def admin_dashboard():
             
             refreshLoop();
 
+            // ── CAPTURE RFID DIRECTE DEPUIS LE NAVIGATEUR ──
+            // Le lecteur RFID USB tape le code très vite puis appuie sur Entrée
+            // On capture ces frappes globalement, même si aucun input n'est focalisé
+            let rfidBuffer = '';
+            let rfidTimer = null;
+            document.addEventListener('keypress', function(e) {{
+                // Ignorer si l'utilisateur tape dans un vrai champ texte
+                const tag = document.activeElement.tagName;
+                if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+                if (e.key === 'Enter') {{
+                    if (rfidBuffer.length >= 4) {{
+                        const uid = rfidBuffer.trim().toUpperCase();
+                        rfidBuffer = '';
+                        clearTimeout(rfidTimer);
+                        // Envoyer l'UID au serveur
+                        fetch('/api/rfid_login', {{
+                            method: 'POST',
+                            headers: {{'Content-Type': 'application/json'}},
+                            body: JSON.stringify({{uid: uid}})
+                        }}).then(r => r.json()).then(data => {{
+                            console.log('RFID scan:', uid, data);
+                        }});
+                    }}
+                    rfidBuffer = '';
+                }} else {{
+                    rfidBuffer += e.key;
+                    clearTimeout(rfidTimer);
+                    // Si aucun Entrée après 300ms → reset (protection contre frappe humaine)
+                    rfidTimer = setTimeout(() => {{ rfidBuffer = ''; }}, 300);
+                }}
+            }});
+
             // ── POLLING RFID PROFIL (toutes les 2 secondes) ──
             let lastRfidTs = 0;
             async function pollRfid() {{
